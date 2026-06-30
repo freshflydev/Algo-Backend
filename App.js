@@ -68,7 +68,25 @@ process.on('unhandledRejection', (error) => {
 });
 
 const app = express();
-app.use(cors()); // Enable CORS for all routes
+const allowedOrigins = new Set([
+  'https://algo.foodcrisis.in',
+  'https://www.algo.foodcrisis.in',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+]);
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+    return callback(null, false);
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  credentials: false,
+  maxAge: 86400,
+  optionsSuccessStatus: 204,
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
 
 // Express Server
