@@ -5,22 +5,22 @@ import { calculateGannLevels } from '../util/GannLevels.js';
 
 moment.tz.setDefault('Asia/Kolkata');
 
-export function rebuildDailyAnalysis({ symbol, rangeFrom, rangeTo } = {}) {
-  const symbols = symbol ? [symbol.toUpperCase()] : getDb().prepare(`
+export async function rebuildDailyAnalysis({ symbol, rangeFrom, rangeTo } = {}) {
+  const symbols = symbol ? [symbol.toUpperCase()] : (await getDb().prepare(`
     SELECT DISTINCT symbol FROM candles WHERE resolution IN ('D', '1D')
-  `).all().map((row) => row.symbol);
+  `).all()).map((row) => row.symbol);
 
   const output = [];
   for (const item of symbols) {
-    const candles = getDailyCandles(item, rangeFrom, rangeTo);
+    const candles = await getDailyCandles(item, rangeFrom, rangeTo);
     const rows = analyzeDailyCandles(item, candles);
-    rows.forEach(upsertAnalysisRow);
+    for (const row of rows) await upsertAnalysisRow(row);
     output.push({ symbol: item, count: rows.length, latest: rows[rows.length - 1] || null });
   }
   return output;
 }
 
-export function listDailyAnalysis(filters = {}) {
+export async function listDailyAnalysis(filters = {}) {
   const conditions = [];
   const params = [];
   if (filters.symbol) {
@@ -49,34 +49,23 @@ export function listDailyAnalysis(filters = {}) {
   `).all(...params, limit);
 }
 
-export function listInstrumentTrend(symbol, limit = 45) {
-  const rows = listDailyAnalysis({ symbol, limit });
-  return rows.map((row) => {
-    const raw = safeJson(row.raw_json);
-    const normalGann = raw.normalGann || {};
-    const haGann = raw.haGann || {};
-    return {
-      symbol: row.symbol,
-      trade_date: row.trade_date,
-      trend: row.current_trend,
-      atr_trend: row.atr_trend,
-      continuation_days: row.consecutive_days,
-      open: row.open,
-      high: row.high,
-      low: row.low,
-      close: row.close,
-      ha_open: row.ha_open,
-      ha_close: row.ha_close,
-      day_change_percent: row.day_change_percent,
-      stop_loss: row.stop_loss,
-      sl_hit: row.sl_hit,
-      gann_buy: row.gann_buy,
-      gann_sell: row.gann_sell,
-      ha_gann_buy: row.ha_gann_buy,
-      ha_gann_sell: row.ha_gann_sell,
-      target_hits: targetHits(row, normalGann, haGann),
-    };
-  });
+export async function listInstrumentTrend(symbol, limit = 30) {
+  const visibleLimit = Math.min(Number(limit || 30), 90);
+  const warmupLimit = visibleLimit * 2;
+  const candles = await getLatestDailyCandles(symbol.toUpperCase(), warmupLimit);
+  const analyzed = analyzeDailyCandles(symbol.toUpperCase(), candles);
+  const visible = analyzed.slice(-visibleLimit).reverse();
+  return {
+    symbol: symbol.toUpperCase(),
+    requiredWarmupDays: visibleLimit,
+    loadedCandles: candles.length,
+    normal: visible.map((row) => trendRow(row, 'normal')).reverse(),
+    heikinAshi: visible.map((row) => trendRow(row, 'ha')).reverse(),
+    latestFirst: {
+      normal: visible.map((row) => trendRow(row, 'normal')),
+      heikinAshi: visible.map((row) => trendRow(row, 'ha')),
+    },
+  };
 }
 
 export function analyzeDailyCandles(symbol, candles) {
@@ -90,7 +79,22 @@ export function analyzeDailyCandles(symbol, candles) {
     const haCandle = ha[i];
     const normalGann = calculateGannLevels(candle.open);
     const haGann = calculateGannLevels(haCandle.open);
-    const trend = calculateTrend(candle, normalGann, haGann, previous);
+    const normalTrend = calculateSingleTrend({
+      close: candle.close,
+      high: candle.high,
+      low: candle.low,
+      buy: normalGann.buy,
+      sell: normalGann.sell,
+      previous: previous?.normal,
+    });
+    const haTrend = calculateSingleTrend({
+      close: haCandle.close,
+      high: haCandle.high,
+      low: haCandle.low,
+      buy: haGann.buy,
+      sell: haGann.sell,
+      previous: previous?.ha,
+    });
     const change = previous
       ? candle.close - previous.close
       : 0;
@@ -114,14 +118,16 @@ export function analyzeDailyCandles(symbol, candles) {
       gannSell: normalGann.sell,
       haGannBuy: haGann.buy,
       haGannSell: haGann.sell,
-      currentTrend: trend.currentTrend,
-      atrTrend: trend.atrTrend,
-      consecutiveDays: trend.consecutiveDays,
-      stopLoss: trend.stopLoss,
-      slHit: trend.stopLoss ? candle.low <= trend.stopLoss && candle.high >= trend.stopLoss : false,
+      currentTrend: combinedTrend(normalTrend.currentTrend, haTrend.currentTrend),
+      atrTrend: haTrend.atrTrend,
+      consecutiveDays: haTrend.consecutiveDays,
+      stopLoss: haTrend.stopLoss,
+      slHit: haTrend.stopLoss ? candle.low <= haTrend.stopLoss && candle.high >= haTrend.stopLoss : false,
       dayChangeValue: Number(change.toFixed(2)),
       dayChangePercent: Number(changePercent.toFixed(2)),
-      raw: { normalGann, haGann },
+      normal: normalTrend,
+      ha: haTrend,
+      raw: { normalGann, haGann, normalTrend, haTrend },
     };
 
     rows.push(row);
@@ -130,7 +136,7 @@ export function analyzeDailyCandles(symbol, candles) {
   return rows;
 }
 
-function getDailyCandles(symbol, rangeFrom, rangeTo) {
+async function getDailyCandles(symbol, rangeFrom, rangeTo) {
   const conditions = [`symbol = ?`, `resolution IN ('D', '1D')`];
   const params = [symbol];
   if (rangeFrom) {
@@ -149,16 +155,23 @@ function getDailyCandles(symbol, rangeFrom, rangeTo) {
   `).all(...params);
 }
 
-function calculateTrend(candle, normalGann, haGann, previous) {
+async function getLatestDailyCandles(symbol, limit) {
+  const rows = await getDb().prepare(`
+    SELECT candle_time as time, open, high, low, close, volume
+    FROM candles
+    WHERE symbol = ? AND resolution IN ('D', '1D')
+    ORDER BY candle_time DESC
+    LIMIT ?
+  `).all(symbol, limit);
+  return rows.reverse();
+}
+
+function calculateSingleTrend({ close, high, low, buy, sell, previous }) {
   let currentTrend = 'NEUTRAL';
-  if (candle.close > normalGann.buy && candle.close > haGann.buy) {
-    currentTrend = 'EXTREME_BULLISH';
-  } else if (candle.close > normalGann.buy) {
-    currentTrend = 'MILD_BULLISH';
-  } else if (candle.close < normalGann.sell && candle.close < haGann.sell) {
-    currentTrend = 'EXTREME_BEARISH';
-  } else if (candle.close < normalGann.sell) {
-    currentTrend = 'MILD_BEARISH';
+  if (close > buy) {
+    currentTrend = 'BULLISH';
+  } else if (close < sell) {
+    currentTrend = 'BEARISH';
   }
 
   const consecutiveDays = previous?.currentTrend === currentTrend
@@ -168,9 +181,9 @@ function calculateTrend(candle, normalGann, haGann, previous) {
   let stopLoss = null;
   if (previous) {
     if (currentTrend.includes('BULLISH')) {
-      stopLoss = previous.haGannSell || normalGann.sell;
+      stopLoss = previous.sell || sell;
     } else if (currentTrend.includes('BEARISH')) {
-      stopLoss = previous.haGannBuy || normalGann.buy;
+      stopLoss = previous.buy || buy;
     } else {
       stopLoss = previous.stopLoss;
     }
@@ -181,11 +194,22 @@ function calculateTrend(candle, normalGann, haGann, previous) {
     atrTrend: currentTrend === 'NEUTRAL' ? previous?.atrTrend || previous?.currentTrend || 'NEUTRAL' : currentTrend,
     consecutiveDays,
     stopLoss,
+    slHit: stopLoss ? low <= stopLoss && high >= stopLoss : false,
+    buy,
+    sell,
   };
 }
 
-function upsertAnalysisRow(row) {
-  getDb().prepare(`
+function combinedTrend(normalTrend, haTrend) {
+  if (normalTrend.includes('BULLISH') && haTrend.includes('BULLISH')) return 'EXTREME_BULLISH';
+  if (normalTrend.includes('BEARISH') && haTrend.includes('BEARISH')) return 'EXTREME_BEARISH';
+  if (normalTrend.includes('BULLISH') || haTrend.includes('BULLISH')) return 'MILD_BULLISH';
+  if (normalTrend.includes('BEARISH') || haTrend.includes('BEARISH')) return 'MILD_BEARISH';
+  return 'NEUTRAL';
+}
+
+async function upsertAnalysisRow(row) {
+  await getDb().prepare(`
     INSERT INTO daily_trend_analysis(
       symbol, trade_date, open, high, low, close, volume,
       ha_open, ha_high, ha_low, ha_close,
@@ -225,16 +249,38 @@ function upsertAnalysisRow(row) {
   );
 }
 
-function targetHits(row, normalGann, haGann) {
-  const side = String(row.current_trend || '').includes('BEARISH') ? 'sell' : 'buy';
-  const normalTargets = side === 'buy' ? normalGann.buyTargets || [] : normalGann.sellTargets || [];
-  const haTargets = side === 'buy' ? haGann.buyTargets || [] : haGann.sellTargets || [];
+function trendRow(row, mode) {
+  const isHa = mode === 'ha';
+  const trend = isHa ? row.ha.currentTrend : row.normal.currentTrend;
+  const gann = isHa ? row.raw.haGann : row.raw.normalGann;
+  return {
+    symbol: row.symbol,
+    mode,
+    trade_date: row.tradeDate,
+    trend,
+    atr_trend: isHa ? row.ha.atrTrend : row.normal.atrTrend,
+    continuation_days: isHa ? row.ha.consecutiveDays : row.normal.consecutiveDays,
+    open: isHa ? row.haOpen : row.open,
+    high: isHa ? row.haHigh : row.high,
+    low: isHa ? row.haLow : row.low,
+    close: isHa ? row.haClose : row.close,
+    source_close: row.close,
+    day_change_percent: row.dayChangePercent,
+    stop_loss: isHa ? row.ha.stopLoss : row.normal.stopLoss,
+    sl_hit: isHa ? row.ha.slHit : row.normal.slHit,
+    gann_buy: isHa ? row.haGannBuy : row.gannBuy,
+    gann_sell: isHa ? row.haGannSell : row.gannSell,
+    target_hits: targetHits({ high: isHa ? row.haHigh : row.high, low: isHa ? row.haLow : row.low, trend }, gann),
+  };
+}
+
+function targetHits(row, gann) {
+  const side = String(row.trend || '').includes('BEARISH') ? 'sell' : 'buy';
+  const targets = side === 'buy' ? gann.buyTargets || [] : gann.sellTargets || [];
   return [1, 2, 3, 4, 5].map((level) => {
-    const normalTarget = normalTargets[level - 1];
-    const haTarget = haTargets[level - 1];
-    const hitNormal = normalTarget ? side === 'buy' ? row.high >= normalTarget : row.low <= normalTarget : false;
-    const hitHa = haTarget ? side === 'buy' ? row.high >= haTarget : row.low <= haTarget : false;
-    return { level, normalTarget, haTarget, hitNormal, hitHa };
+    const target = targets[level - 1];
+    const hit = target ? side === 'buy' ? row.high >= target : row.low <= target : false;
+    return { level, target, hit };
   });
 }
 
