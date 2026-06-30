@@ -239,6 +239,11 @@ export async function logsAPI(req, res) {
 
 export async function fyersCallbackAPI(req, res) {
   const code = req.query.auth_code || req.query.code;
+  if (!code) {
+    return handleBrokerCallbackPage(res, req.query.admin === '1' ? 'admin' : 'user', () => {
+      throw new Error('Broker callback is missing auth code. Please start broker connect again from the app.');
+    });
+  }
   if (req.query.admin === '1') {
     return handleBrokerCallbackPage(res, 'admin', () => completeAdminBrokerCallback({ code }));
   }
@@ -255,6 +260,11 @@ export async function fyersCallbackAPI(req, res) {
 }
 
 export async function upstoxCallbackAPI(req, res) {
+  if (!req.query.code) {
+    return handleBrokerCallbackPage(res, 'user', () => {
+      throw new Error('Broker callback is missing auth code. Please start broker connect again from the app.');
+    });
+  }
   return handleBrokerCallbackPage(res, 'user', () => completeUserBrokerCallback({
     broker: 'upstox',
     mobile: req.query.mobile || req.query.state,
@@ -266,13 +276,13 @@ export async function upstoxCallbackAPI(req, res) {
 async function handleBrokerCallbackPage(res, role, fn) {
   try {
     const data = await fn();
-    return redirectToFrontend(res, {
+    return renderCallbackPage(res, {
       brokerStatus: 'connected',
       role,
       message: `${data.broker || 'Broker'} connected successfully.`,
     });
   } catch (error) {
-    return redirectToFrontend(res, {
+    return renderCallbackPage(res, {
       brokerStatus: 'error',
       role,
       message: error.message || String(error),
@@ -280,7 +290,7 @@ async function handleBrokerCallbackPage(res, role, fn) {
   }
 }
 
-async function redirectToFrontend(res, params) {
+async function renderCallbackPage(res, params) {
   let frontendUrl = process.env.FRONTEND_URL || 'https://algo.foodcrisis.in';
   try {
     frontendUrl = (await getSettings()).frontend_url || frontendUrl;
@@ -289,7 +299,59 @@ async function redirectToFrontend(res, params) {
   }
   const url = new URL(frontendUrl);
   Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
-  res.redirect(url.toString());
+  const isError = params.brokerStatus === 'error';
+  const title = isError ? 'Broker connection failed' : 'Broker connected';
+  const safeMessage = escapeHtml(params.message || '');
+  const redirectUrl = escapeHtml(url.toString());
+  res.status(isError ? 400 : 200).send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="refresh" content="5;url=${redirectUrl}" />
+  <title>${title}</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f5f7fb; color: #111827; }
+    main { width: min(420px, calc(100vw - 32px)); background: #fff; border: 1px solid #e5e7eb; border-radius: 16px; box-shadow: 0 18px 50px rgba(15, 23, 42, .12); padding: 28px; text-align: center; }
+    .mark { width: 52px; height: 52px; border-radius: 999px; margin: 0 auto 16px; display: grid; place-items: center; font-size: 30px; font-weight: 800; color: #fff; background: ${isError ? '#dc2626' : '#16a34a'}; }
+    h1 { margin: 0 0 10px; font-size: 24px; line-height: 1.2; }
+    p { margin: 0; color: #4b5563; line-height: 1.5; }
+    .message { margin-top: 14px; padding: 12px; border-radius: 10px; background: ${isError ? '#fef2f2' : '#f0fdf4'}; color: ${isError ? '#991b1b' : '#166534'}; font-weight: 650; overflow-wrap: anywhere; }
+    a { display: inline-block; margin-top: 20px; color: #1d4ed8; font-weight: 700; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="mark">${isError ? '!' : '✓'}</div>
+    <h1>${title}</h1>
+    <p>You will be redirected to the app in <strong id="count">5</strong> seconds.</p>
+    <div class="message">${safeMessage}</div>
+    <a href="${redirectUrl}">Open app now</a>
+  </main>
+  <script>
+    let count = 5;
+    const el = document.getElementById('count');
+    const timer = setInterval(() => {
+      count -= 1;
+      el.textContent = String(Math.max(count, 0));
+      if (count <= 0) {
+        clearInterval(timer);
+        window.location.replace(${JSON.stringify(url.toString())});
+      }
+    }, 1000);
+  </script>
+</body>
+</html>`);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }
 
 async function handle(res, fn) {
