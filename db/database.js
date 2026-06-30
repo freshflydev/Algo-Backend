@@ -1,11 +1,174 @@
+import 'dotenv/config';
+import Mysql from 'sync-mysql';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
 
 const DB_PATH = path.resolve('algotrade.sqlite');
-const db = new DatabaseSync(DB_PATH);
+const DB_CLIENT = (process.env.DB_CLIENT || process.env.DB_DRIVER || 'sqlite').toLowerCase();
+const isMysql = DB_CLIENT === 'mysql';
+const db = isMysql ? createMysqlDb() : new DatabaseSync(DB_PATH);
 
-db.exec('PRAGMA journal_mode = WAL');
-db.exec('PRAGMA foreign_keys = ON');
+if (!isMysql) {
+  db.exec('PRAGMA journal_mode = WAL');
+  db.exec('PRAGMA foreign_keys = ON');
+}
+
+function createMysqlDb() {
+  return new MysqlCompatDb({
+    host: process.env.MYSQL_HOST || process.env.DB_HOST || 'localhost',
+    user: process.env.MYSQL_USER || process.env.DB_USER,
+    password: process.env.MYSQL_PASSWORD || process.env.DB_PASSWORD,
+    database: process.env.MYSQL_DATABASE || process.env.DB_NAME,
+    port: Number(process.env.MYSQL_PORT || process.env.DB_PORT || 3306),
+    timezone: process.env.MYSQL_TIMEZONE || '+05:30',
+  });
+}
+
+class MysqlCompatDb {
+  constructor(config) {
+    if (!config.user || !config.database) {
+      throw new Error('MySQL mode requires MYSQL_USER and MYSQL_DATABASE.');
+    }
+    this.connection = new Mysql(config);
+  }
+
+  exec(sql) {
+    for (const statement of splitSqlStatements(sql)) {
+      const next = this.normalizeSql(statement);
+      if (!next) continue;
+      this.connection.query(next);
+    }
+  }
+
+  prepare(sql) {
+    const pragma = parsePragma(sql);
+    if (pragma) return this.preparePragma(pragma);
+    const normalized = this.normalizeSql(sql);
+    return {
+      run: (...params) => {
+        const result = this.connection.query(normalized, normalizeMysqlParams(params));
+        return {
+          lastInsertRowid: result?.insertId || 0,
+          changes: result?.affectedRows || 0,
+        };
+      },
+      all: (...params) => normalizeMysqlRows(this.connection.query(normalized, normalizeMysqlParams(params))),
+      get: (...params) => normalizeMysqlRows(this.connection.query(normalized, normalizeMysqlParams(params)))[0],
+    };
+  }
+
+  preparePragma(pragma) {
+    return {
+      run: () => ({ lastInsertRowid: 0, changes: 0 }),
+      get: () => this.queryPragma(pragma)[0],
+      all: () => this.queryPragma(pragma),
+    };
+  }
+
+  queryPragma({ name, table }) {
+    if (name === 'table_info') {
+      return this.connection.query(`
+        SELECT COLUMN_NAME AS name
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+        ORDER BY ORDINAL_POSITION
+      `, [table]);
+    }
+    if (name === 'index_list') {
+      return this.connection.query(`
+        SELECT INDEX_NAME AS name, CASE WHEN NON_UNIQUE = 0 THEN 1 ELSE 0 END AS unique
+        FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+        GROUP BY INDEX_NAME, NON_UNIQUE
+      `, [table]);
+    }
+    return [];
+  }
+
+  normalizeSql(sql) {
+    let next = sql.trim();
+    if (!next || next.startsWith('--')) return '';
+    if (/^PRAGMA/i.test(next)) return '';
+    next = normalizeMysqlDdl(next);
+    next = normalizeMysqlUpsert(next);
+    next = quoteMysqlAppSettingsKey(next);
+    next = next.replace(/DATE\('now'\)/gi, 'CURRENT_DATE()');
+    return next;
+  }
+}
+
+function splitSqlStatements(sql) {
+  return sql
+    .split(';')
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+}
+
+function parsePragma(sql) {
+  const text = sql.trim();
+  let match = text.match(/^PRAGMA\s+table_info\((\w+)\)/i);
+  if (match) return { name: 'table_info', table: match[1] };
+  match = text.match(/^PRAGMA\s+index_list\((\w+)\)/i);
+  if (match) return { name: 'index_list', table: match[1] };
+  return null;
+}
+
+function normalizeMysqlRows(rows) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((row) => ({ ...row }));
+}
+
+function normalizeMysqlParams(params) {
+  return params.map((value) => (value === undefined ? null : value));
+}
+
+function normalizeMysqlDdl(sql) {
+  if (!/^CREATE TABLE/i.test(sql) && !/^ALTER TABLE/i.test(sql)) return sql;
+  let next = sql
+    .replace(/INTEGER PRIMARY KEY AUTOINCREMENT/gi, 'INT NOT NULL AUTO_INCREMENT PRIMARY KEY')
+    .replace(/\bINTEGER\b/gi, 'INT')
+    .replace(/\bREAL\b/gi, 'DOUBLE')
+    .replace(/\bTEXT\b/gi, 'VARCHAR(255)')
+    .replace(/\braw_json VARCHAR\(255\)/gi, 'raw_json LONGTEXT')
+    .replace(/\bstats_json VARCHAR\(255\)/gi, 'stats_json LONGTEXT')
+    .replace(/\btrades_json VARCHAR\(255\)/gi, 'trades_json LONGTEXT')
+    .replace(/\bsettings_json VARCHAR\(255\) NOT NULL DEFAULT '\{\}'/gi, "settings_json LONGTEXT NOT NULL")
+    .replace(/\bsettings_json VARCHAR\(255\)/gi, 'settings_json LONGTEXT')
+    .replace(/\bvalue VARCHAR\(255\)/gi, 'value LONGTEXT')
+    .replace(/\baccess_token VARCHAR\(255\)/gi, 'access_token LONGTEXT')
+    .replace(/\brefresh_token VARCHAR\(255\)/gi, 'refresh_token LONGTEXT')
+    .replace(/\bauth_code VARCHAR\(255\)/gi, 'auth_code LONGTEXT')
+    .replace(/\bmessage VARCHAR\(255\)/gi, 'message TEXT')
+    .replace(/(\w+_at) VARCHAR\(255\) NOT NULL DEFAULT CURRENT_TIMESTAMP/gi, '$1 DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP')
+    .replace(/(\w+_at) VARCHAR\(255\)/gi, '$1 DATETIME')
+    .replace(/\btrade_date VARCHAR\(255\)/gi, 'trade_date DATE')
+    .replace(/\brange_from VARCHAR\(255\)/gi, 'range_from DATE')
+    .replace(/\brange_to VARCHAR\(255\)/gi, 'range_to DATE');
+  if (/^CREATE TABLE/i.test(next)) next = `${next} ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`;
+  return next;
+}
+
+function normalizeMysqlUpsert(sql) {
+  let next = sql;
+  if (/ON CONFLICT\s*\([^)]+\)\s*DO NOTHING/i.test(next)) {
+    return next
+      .replace(/^INSERT INTO/i, 'INSERT IGNORE INTO')
+      .replace(/\s+ON CONFLICT\s*\([^)]+\)\s*DO NOTHING/i, '');
+  }
+  if (/ON CONFLICT\s*\([^)]+\)\s*DO UPDATE SET/i.test(next)) {
+    next = next.replace(/\s+ON CONFLICT\s*\([^)]+\)\s*DO UPDATE SET/i, ' ON DUPLICATE KEY UPDATE');
+    next = next.replace(/excluded\.([a-zA-Z0-9_]+)/g, 'VALUES($1)');
+  }
+  return next;
+}
+
+function quoteMysqlAppSettingsKey(sql) {
+  return sql
+    .replace(/CREATE TABLE IF NOT EXISTS app_settings\s*\(\s*key\b/i, 'CREATE TABLE IF NOT EXISTS app_settings (`key`')
+    .replace(/INSERT( IGNORE)? INTO app_settings\(key,/gi, 'INSERT$1 INTO app_settings(`key`,')
+    .replace(/SELECT key, value FROM app_settings/gi, 'SELECT `key`, value FROM app_settings')
+    .replace(/ORDER BY key\b/gi, 'ORDER BY `key`');
+}
 
 export function initDatabase() {
   db.exec(`
@@ -315,6 +478,7 @@ function addColumnIfMissing(table, column, sql) {
 }
 
 function migrateUserBrokersForMultipleAccounts() {
+  if (isMysql) return;
   const indexes = db.prepare('PRAGMA index_list(user_brokers)').all();
   const hasUniqueBrokerIndex = indexes.some((item) => item.unique === 1);
   if (!hasUniqueBrokerIndex) return;
@@ -412,5 +576,8 @@ export function getDb() {
 }
 
 export function nowIso() {
+  if (isMysql) {
+    return new Date().toISOString().slice(0, 19).replace('T', ' ');
+  }
   return new Date().toISOString();
 }

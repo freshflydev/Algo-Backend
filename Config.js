@@ -1,3 +1,5 @@
+import 'dotenv/config';
+
 export const APP_ID = process.env.FYERS_APP_ID || "";
 export const SECRET_KEY = process.env.FYERS_SECRET_KEY || "";
 export const REDIRECT_URL = process.env.FYERS_REDIRECT_URL || "http://127.0.0.1:8080/api/callback/fyers";
