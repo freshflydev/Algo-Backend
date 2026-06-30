@@ -122,15 +122,13 @@ return cache.get(key);
 export async function historyQuotes(inp){
     try {
       const dataSource = await getAdminFyersDataSource();
-      const historyClient = dataSource || fyers;
-      if (dataSource) {
-        historyClient.setAppId(dataSource.api_key);
-        historyClient.setAccessToken(dataSource.access_token);
-      } else {
-        setToken();
+      if (!dataSource) {
+        throw new Error('Admin Fyers data source is not connected. Connect admin broker before syncing candle data.');
       }
+      dataSource.setAppId(dataSource.api_key);
+      dataSource.setAccessToken(dataSource.access_token);
       await waitForFyersSlot('history');
-      const response = await historyClient.getHistory(inp);
+      const response = await dataSource.getHistory(inp);
       if(response.s=="error")
           throw new Error(response.message)
       return response;

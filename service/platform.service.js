@@ -533,24 +533,29 @@ export async function fetchAndStoreCandles({ symbol, resolution = '15', rangeFro
   const stored = [];
   for (let index = 0; index < instruments.length; index++) {
     const instrument = instruments[index];
-    await markInstrumentSync(instrument.symbol, 'syncing', Math.round(index / instruments.length * 100));
-    const param = {
-      instrument: instrument.symbol,
-      segment: instrument.segment,
-      type: instrument.instrument_type,
-      timeframe: resolution,
-      date: rangeFrom,
-    };
-    const query = createRequestQuery(param);
-    query.range_from = rangeFrom;
-    query.range_to = rangeTo || rangeFrom;
-    await waitRateLimit();
-    const history = await getHistoryQuotes(query);
-    const data = transformCandel(history);
-    const candles = arraysToCandles(data);
-    await storeCandles(instrument.symbol, resolution, candles);
-    await markInstrumentSync(instrument.symbol, 'idle', 100);
-    stored.push({ symbol: instrument.symbol, count: candles.length });
+    try {
+      await markInstrumentSync(instrument.symbol, 'syncing', Math.round(index / instruments.length * 100));
+      const param = {
+        instrument: instrument.symbol,
+        segment: instrument.segment,
+        type: instrument.instrument_type,
+        timeframe: resolution,
+        date: rangeFrom,
+      };
+      const query = createRequestQuery(param);
+      query.range_from = rangeFrom;
+      query.range_to = rangeTo || rangeFrom;
+      await waitRateLimit();
+      const history = await getHistoryQuotes(query);
+      const data = transformCandel(history);
+      const candles = arraysToCandles(data);
+      await storeCandles(instrument.symbol, resolution, candles);
+      await markInstrumentSync(instrument.symbol, candles.length > 0 ? 'ready' : 'empty', 100);
+      stored.push({ symbol: instrument.symbol, count: candles.length, status: candles.length > 0 ? 'ready' : 'empty' });
+    } catch (error) {
+      await markInstrumentSync(instrument.symbol, 'error', 0);
+      stored.push({ symbol: instrument.symbol, count: 0, status: 'error', error: error.message || String(error) });
+    }
   }
   return stored;
 }
