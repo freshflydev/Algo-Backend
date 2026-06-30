@@ -548,7 +548,7 @@ function seedDefaults() {
     ['max_entry_risk_percent', '0.45'],
     ['spike_candle_percent', '1.2'],
     ['server_static_ip', ''],
-    ['frontend_url', process.env.FRONTEND_URL || 'https://foodcrisis.in'],
+    ['frontend_url', process.env.FRONTEND_URL || 'https://algo.foodcrisis.in'],
     ['public_api_base', process.env.PUBLIC_API_BASE || 'http://localhost:8080'],
   ];
 
