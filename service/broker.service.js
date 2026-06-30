@@ -89,9 +89,15 @@ export function onStart(){
     if(cache.get("access_token"))
       fyers.setAccessToken(cache.get("access_token"));
 
-    enableScheduler();
+    if (isEnvEnabled('LEGACY_ALERT_SCHEDULER_ENABLED')) {
+      enableScheduler();
+    }
     onLocalTest();
 } 
+
+function isEnvEnabled(name) {
+  return ['1', 'true', 'yes', 'on'].includes(String(process.env[name] || '').trim().toLowerCase());
+}
 
 function setToken(){
   try{

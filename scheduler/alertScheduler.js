@@ -227,16 +227,14 @@ export function configureEquitySchedulerJob() {
 }
 
 
-// Schedule a task to run at 9:15 AM IST every day
-const preMarketJob = schedule.scheduleJob({ hour: 9, minute: 15, tz: 'Asia/Kolkata' }, () => {
-  console.log("Pre-market function started at 9:15 AM IST");
+// Optional legacy pre-market hook. Keep disabled on shared web hosting unless
+// this process is intentionally being used as the worker.
+if (['1', 'true', 'yes', 'on'].includes(String(process.env.LEGACY_PREMARKET_JOB_ENABLED || '').trim().toLowerCase())) {
+  schedule.scheduleJob({ hour: 9, minute: 15, tz: 'Asia/Kolkata' }, () => {
+    console.log("Pre-market function started at 9:15 AM IST");
 
-  // Start the pre-market task
-  //preMarketTask();
-
-  // Execute the final task after 59 seconds (just before the 1-minute mark)
-  setTimeout(() => {
-    //finalTask();
-    console.log("Pre-market function ended after 1 minute.");
-  }, 59000); // 59 seconds timeout to execute final task before 1 minute ends
-});
+    setTimeout(() => {
+      console.log("Pre-market function ended after 1 minute.");
+    }, 59000);
+  });
+}

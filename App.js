@@ -66,6 +66,15 @@ import { startLiveOrderMonitor } from './service/liveOrderMonitor.service.js';
 process.on('unhandledRejection', (error) => {
   console.error('Unhandled async service error:', error);
 });
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught service error:', error);
+});
+
+function envEnabled(name, fallback = false) {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
 
 const app = express();
 const allowedOrigins = new Set([
@@ -209,10 +218,14 @@ app.get('/api/callback/fyers', fyersCallbackAPI);
 app.get('/api/callback/upstox', upstoxCallbackAPI);
 
 safeStartup('database init', () => initDatabase());
-safeStartup('broker boot', () => onStart());
-safeStartup('algo schedulers', () => enableAlgoSchedulers());
-safeStartup('live order monitor', () => startLiveOrderMonitor());
-safeStartup('local candle file load', () => loadCandleDataFromFile());
+
+// Hostinger shared Node hosting is best used as the API process. Long-running
+// jobs are opt-in so deploys do not start duplicated schedulers or websocket
+// loops while Passenger/Node restarts the app.
+if (envEnabled('AUTO_START_BROKER')) safeStartup('broker boot', () => onStart());
+if (envEnabled('SCHEDULER_ENABLED')) safeStartup('algo schedulers', () => enableAlgoSchedulers());
+if (envEnabled('LIVE_MONITOR_ENABLED')) safeStartup('live order monitor', () => startLiveOrderMonitor());
+if (envEnabled('LOAD_LOCAL_CANDLES')) safeStartup('local candle file load', () => loadCandleDataFromFile());
 
 function safeStartup(label, fn) {
   try {
