@@ -9,7 +9,7 @@ import { disableScheduler, enableScheduler } from './scheduler/alertScheduler.js
 import { addStockAPI, listStockAPI, priceAlert, removeStockAPI, sendSignalAert } from './controller/alert.controller.js';
 import { loadCandleDataFromFile } from './util/HistoryData.js';
 import { SampleWSMessage } from './util/Utils.js';
-import { initDatabase } from './db/database.js';
+import { getDbInfo, initDatabase } from './db/database.js';
 import {
   addInstrumentAPI,
   addUserWatchlistAPI,
@@ -98,7 +98,7 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json());
 app.get('/api/health', (req, res) => {
-  res.status(200).json({ ok: true, service: 'Algo API', time: new Date().toISOString() });
+  res.status(200).json({ ok: true, service: 'Algo API', time: new Date().toISOString(), db: getDbInfo() });
 });
 
 // Express Server

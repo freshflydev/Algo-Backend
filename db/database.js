@@ -5,10 +5,18 @@ import path from 'path';
 
 const require = createRequire(import.meta.url);
 const DB_PATH = path.resolve('algotrade.sqlite');
-const DB_CLIENT = (process.env.DB_CLIENT || process.env.DB_DRIVER || 'sqlite').toLowerCase();
+const hasMysqlConfig = Boolean(
+  (process.env.MYSQL_DATABASE || process.env.DB_NAME) &&
+  (process.env.MYSQL_USER || process.env.DB_USER),
+);
+const DB_CLIENT = (process.env.DB_CLIENT || process.env.DB_DRIVER || (hasMysqlConfig ? 'mysql' : 'sqlite')).toLowerCase();
 const isMysql = DB_CLIENT === 'mysql';
+const isProduction = process.env.NODE_ENV === 'production';
 let db;
 
+if (isProduction && !isMysql && process.env.ALLOW_SQLITE_IN_PRODUCTION !== 'true') {
+  throw new Error('Refusing to start with SQLite in production. Set DB_CLIENT=mysql and MySQL credentials, or ALLOW_SQLITE_IN_PRODUCTION=true only for a temporary local test.');
+}
 
 function createMysqlDb() {
   return new MysqlCompatDb(mysql.createPool({
@@ -699,15 +707,7 @@ async function seedDefaults() {
   const strategyStmt = db.prepare(`
     INSERT INTO strategy_catalog(code, name, mode, direction, timeframe, min_capital, settings_json, description)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(code) DO UPDATE SET
-      name = excluded.name,
-      mode = excluded.mode,
-      direction = excluded.direction,
-      timeframe = excluded.timeframe,
-      min_capital = excluded.min_capital,
-      settings_json = excluded.settings_json,
-      description = excluded.description,
-      updated_at = CURRENT_TIMESTAMP
+    ON CONFLICT(code) DO NOTHING
   `);
   for (const strategy of strategies) {
     await strategyStmt.run(...strategy);
@@ -716,6 +716,14 @@ async function seedDefaults() {
 
 export function getDb() {
   return db;
+}
+
+export function getDbInfo() {
+  return {
+    client: isMysql ? 'mysql' : 'sqlite',
+    database: isMysql ? (process.env.MYSQL_DATABASE || process.env.DB_NAME || null) : DB_PATH,
+    host: isMysql ? (process.env.MYSQL_HOST || process.env.DB_HOST || 'localhost') : null,
+  };
 }
 
 export function nowIso() {
