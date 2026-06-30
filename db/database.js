@@ -137,7 +137,7 @@ function normalizeMysqlParams(params) {
 
 function normalizeMysqlDdl(sql) {
   if (!/^CREATE TABLE/i.test(sql) && !/^ALTER TABLE/i.test(sql)) return sql;
-  let next = sql
+  let next = stripMysqlCheckConstraints(sql)
     .replace(/INTEGER PRIMARY KEY AUTOINCREMENT/gi, 'INT NOT NULL AUTO_INCREMENT PRIMARY KEY')
     .replace(/\bINTEGER\b/gi, 'INT')
     .replace(/\bREAL\b/gi, 'DOUBLE')
@@ -159,6 +159,32 @@ function normalizeMysqlDdl(sql) {
     .replace(/\brange_to VARCHAR\(255\)/gi, 'range_to DATE');
   if (/^CREATE TABLE/i.test(next)) next = `${next} ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`;
   return next;
+}
+
+function stripMysqlCheckConstraints(sql) {
+  let output = '';
+  for (let index = 0; index < sql.length; index += 1) {
+    if (sql.slice(index, index + 5).toUpperCase() !== 'CHECK') {
+      output += sql[index];
+      continue;
+    }
+    let cursor = index + 5;
+    while (/\s/.test(sql[cursor] || '')) cursor += 1;
+    if (sql[cursor] !== '(') {
+      output += sql[index];
+      continue;
+    }
+    let depth = 0;
+    for (; cursor < sql.length; cursor += 1) {
+      if (sql[cursor] === '(') depth += 1;
+      if (sql[cursor] === ')') {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+    }
+    index = cursor;
+  }
+  return output.replace(/\s+,/g, ',').replace(/\s{2,}/g, ' ');
 }
 
 function normalizeMysqlUpsert(sql) {
@@ -609,4 +635,9 @@ export function nowIso() {
     return new Date().toISOString().slice(0, 19).replace('T', ' ');
   }
   return new Date().toISOString();
+}
+
+export function normalizeMysqlSqlForTest(sql) {
+  const compat = Object.create(MysqlCompatDb.prototype);
+  return compat.normalizeSql(sql);
 }
