@@ -92,6 +92,7 @@ class MysqlCompatDb {
     next = normalizeMysqlDdl(next);
     next = normalizeMysqlUpsert(next);
     next = quoteMysqlAppSettingsKey(next);
+    next = normalizeMysqlExpressions(next);
     next = next.replace(/DATE\('now'\)/gi, 'CURRENT_DATE()');
     return next;
   }
@@ -168,6 +169,13 @@ function quoteMysqlAppSettingsKey(sql) {
     .replace(/INSERT( IGNORE)? INTO app_settings\(key,/gi, 'INSERT$1 INTO app_settings(`key`,')
     .replace(/SELECT key, value FROM app_settings/gi, 'SELECT `key`, value FROM app_settings')
     .replace(/ORDER BY key\b/gi, 'ORDER BY `key`');
+}
+
+function normalizeMysqlExpressions(sql) {
+  return sql.replace(
+    /ub\.broker\s*\|\|\s*':'\s*\|\|\s*CASE WHEN ub\.is_active = 1 THEN 'active' ELSE 'saved' END/gi,
+    "CONCAT(ub.broker, ':', CASE WHEN ub.is_active = 1 THEN 'active' ELSE 'saved' END)",
+  );
 }
 
 export function initDatabase() {
@@ -540,6 +548,8 @@ function seedDefaults() {
     ['max_entry_risk_percent', '0.45'],
     ['spike_candle_percent', '1.2'],
     ['server_static_ip', ''],
+    ['frontend_url', process.env.FRONTEND_URL || 'https://foodcrisis.in'],
+    ['public_api_base', process.env.PUBLIC_API_BASE || 'http://localhost:8080'],
   ];
 
   const stmt = db.prepare(`

@@ -9,6 +9,8 @@ import {
   backtestSwingHaDoji,
   calculateAndStoreDailyGannLevels,
   completeUserBrokerCallback,
+  completeAdminBrokerCallback,
+  connectAdminDataSource,
   connectUserBroker,
   disableInstrument,
   fetchAndStoreCandles,
@@ -101,6 +103,10 @@ export async function removeUserBrokerAPI(req, res) {
 
 export async function connectUserBrokerAPI(req, res) {
   return handle(res, () => connectUserBroker(req.params.mobile, req.body.brokerId || req.body.broker));
+}
+
+export async function connectAdminDataSourceAPI(req, res) {
+  return handle(res, () => connectAdminDataSource());
 }
 
 export async function startUserInstanceAPI(req, res) {
@@ -232,24 +238,58 @@ export async function logsAPI(req, res) {
 }
 
 export async function fyersCallbackAPI(req, res) {
-  if (req.query.mobile) {
-    return handle(res, () => completeUserBrokerCallback({
+  const code = req.query.auth_code || req.query.code;
+  if (req.query.admin === '1') {
+    return handleBrokerCallbackPage(res, 'admin', () => completeAdminBrokerCallback({ code }));
+  }
+  const mobile = req.query.mobile || req.query.state;
+  if (mobile) {
+    return handleBrokerCallbackPage(res, 'user', () => completeUserBrokerCallback({
       broker: 'fyers',
-      mobile: req.query.mobile,
-      code: req.query.auth_code || req.query.code,
+      mobile,
+      code,
       brokerId: req.query.brokerId,
     }));
   }
-  return handle(res, () => brokerAccess(req.query.auth_code || req.query.code));
+  return handleBrokerCallbackPage(res, 'admin', () => brokerAccess(code));
 }
 
 export async function upstoxCallbackAPI(req, res) {
-  return handle(res, () => completeUserBrokerCallback({
+  return handleBrokerCallbackPage(res, 'user', () => completeUserBrokerCallback({
     broker: 'upstox',
     mobile: req.query.mobile || req.query.state,
     code: req.query.code,
     brokerId: req.query.brokerId,
   }));
+}
+
+async function handleBrokerCallbackPage(res, role, fn) {
+  try {
+    const data = await fn();
+    return redirectToFrontend(res, {
+      brokerStatus: 'connected',
+      role,
+      message: `${data.broker || 'Broker'} connected successfully.`,
+    });
+  } catch (error) {
+    return redirectToFrontend(res, {
+      brokerStatus: 'error',
+      role,
+      message: error.message || String(error),
+    });
+  }
+}
+
+function redirectToFrontend(res, params) {
+  let frontendUrl = process.env.FRONTEND_URL || 'https://foodcrisis.in';
+  try {
+    frontendUrl = getSettings().frontend_url || frontendUrl;
+  } catch {
+    // Keep callback response available even if settings cannot be loaded.
+  }
+  const url = new URL(frontendUrl);
+  Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
+  res.redirect(url.toString());
 }
 
 async function handle(res, fn) {

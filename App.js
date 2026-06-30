@@ -16,6 +16,7 @@ import {
   activeUserBrokerAPI,
   backtestSummariesAPI,
   brokerStatesAPI,
+  connectAdminDataSourceAPI,
   connectUserBrokerAPI,
   dailyGannAPI,
   disableInstrumentAPI,
@@ -153,6 +154,7 @@ app.post('/api/admin/daily-analysis/rebuild', rebuildDailyAnalysisAPI);
 app.get('/api/admin/daily-analysis', listDailyAnalysisAPI);
 app.get('/api/admin/trades', tradesAPI);
 app.get('/api/admin/brokers', brokerStatesAPI);
+app.post('/api/admin/brokers/connect', connectAdminDataSourceAPI);
 app.get('/api/admin/instances', instancesAPI);
 app.get('/api/admin/open-orders', openOrdersAPI);
 app.get('/api/admin/performance', performanceAPI);

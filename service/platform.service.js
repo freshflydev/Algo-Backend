@@ -26,6 +26,7 @@ export function updateSettings(settings) {
   Object.entries(settings || {}).forEach(([key, value]) => {
     stmt.run(key, String(value), nowIso());
   });
+  syncAdminBrokerSettings(settings);
   return getSettings();
 }
 
@@ -277,6 +278,52 @@ export async function connectUserBroker(mobile, brokerNameOrId) {
     broker: 'upstox',
     authUrl: `https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=${encodeURIComponent(broker.api_key)}&redirect_uri=${redirectUri}&state=${encodeURIComponent(mobile)}`,
   };
+}
+
+export async function connectAdminDataSource() {
+  const settings = getSettings();
+  const broker = settings.data_source_broker || 'fyers';
+  if (broker !== 'fyers') throw new Error('Only Fyers is supported as data source broker.');
+  if (!settings.data_source_api_key || !settings.data_source_secret_key) {
+    throw new Error('Save Fyers API key and secret before connecting data source.');
+  }
+  syncAdminBrokerSettings(settings);
+  const redirectUrl = adminCallbackUrl(settings.data_source_redirect_url, settings.public_api_base);
+  const fyers = new FyersAPI.fyersModel();
+  fyers.setAppId(settings.data_source_api_key);
+  fyers.setRedirectUrl(redirectUrl);
+  return { broker: 'fyers', authUrl: await fyers.generateAuthCode(), redirectUrl };
+}
+
+export async function completeAdminBrokerCallback({ code }) {
+  const settings = getSettings();
+  if (!settings.data_source_api_key || !settings.data_source_secret_key) {
+    throw new Error('Admin data source credentials are not saved.');
+  }
+  const redirectUrl = adminCallbackUrl(settings.data_source_redirect_url, settings.public_api_base);
+  const fyers = new FyersAPI.fyersModel();
+  fyers.setAppId(settings.data_source_api_key);
+  fyers.setRedirectUrl(redirectUrl);
+  const data = await fyers.generate_access_token({
+    client_id: settings.data_source_api_key,
+    secret_key: settings.data_source_secret_key,
+    auth_code: code,
+  });
+  if (data.code && data.code !== 200) throw new Error(data.message || 'Fyers token exchange failed.');
+  upsertAdminBrokerTokens({
+    apiKey: settings.data_source_api_key,
+    secretKey: settings.data_source_secret_key,
+    redirectUrl,
+    authCode: code,
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token,
+  });
+  updateSettings({
+    data_source_status: 'connected',
+    data_source_access_token: data.access_token,
+    data_source_refresh_token: data.refresh_token || '',
+  });
+  return { broker: 'fyers', connected: true };
 }
 
 export async function completeUserBrokerCallback({ broker, mobile, code, brokerId }) {
@@ -681,11 +728,28 @@ export function listTrades(filters = {}) {
     conditions.push('o.strategy = ?');
     params.push(filters.strategy);
   }
+  if (filters.category && filters.category !== 'all') {
+    conditions.push("COALESCE(i.category, 'stock') = ?");
+    params.push(filters.category);
+  }
+  if (filters.date) {
+    conditions.push('DATE(o.created_at) = ?');
+    params.push(filters.date);
+  }
+  if (filters.rangeFrom) {
+    conditions.push('DATE(o.created_at) >= ?');
+    params.push(filters.rangeFrom);
+  }
+  if (filters.rangeTo) {
+    conditions.push('DATE(o.created_at) <= ?');
+    params.push(filters.rangeTo);
+  }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   return getDb().prepare(`
-    SELECT o.*, u.mobile
+    SELECT o.*, u.mobile, COALESCE(i.category, 'stock') AS category
     FROM orders o
     JOIN users u ON u.id = o.user_id
+    LEFT JOIN instruments i ON i.symbol = o.symbol
     ${where}
     ORDER BY o.created_at DESC
     LIMIT 500
@@ -954,11 +1018,67 @@ function saveBrokerTokens(accountId, authCode, accessToken, refreshToken) {
   if (row) getDb().prepare('UPDATE user_brokers SET is_active = 0 WHERE user_id = ? AND id != ?').run(row.user_id, accountId);
 }
 
+function syncAdminBrokerSettings(settings = {}) {
+  if (!settings.data_source_api_key || !settings.data_source_secret_key) return;
+  getDb().prepare(`
+    INSERT INTO admin_brokers(broker, api_key, secret_key, redirect_url, updated_at)
+    VALUES ('fyers', ?, ?, ?, ?)
+    ON CONFLICT(broker) DO UPDATE SET
+      api_key = excluded.api_key,
+      secret_key = excluded.secret_key,
+      redirect_url = excluded.redirect_url,
+      updated_at = excluded.updated_at
+  `).run(
+    settings.data_source_api_key,
+    settings.data_source_secret_key,
+    adminCallbackUrl(settings.data_source_redirect_url, settings.public_api_base),
+    nowIso(),
+  );
+}
+
+function upsertAdminBrokerTokens({ apiKey, secretKey, redirectUrl, authCode, accessToken, refreshToken }) {
+  getDb().prepare(`
+    INSERT INTO admin_brokers(
+      broker, api_key, secret_key, redirect_url, auth_code, access_token,
+      refresh_token, token_expires_at, connected_at, is_connected, updated_at
+    )
+    VALUES ('fyers', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+    ON CONFLICT(broker) DO UPDATE SET
+      api_key = excluded.api_key,
+      secret_key = excluded.secret_key,
+      redirect_url = excluded.redirect_url,
+      auth_code = excluded.auth_code,
+      access_token = excluded.access_token,
+      refresh_token = excluded.refresh_token,
+      token_expires_at = excluded.token_expires_at,
+      connected_at = excluded.connected_at,
+      is_connected = 1,
+      updated_at = excluded.updated_at
+  `).run(
+    apiKey,
+    secretKey,
+    redirectUrl,
+    authCode,
+    accessToken,
+    refreshToken || null,
+    moment().add(20, 'hours').toISOString(),
+    nowIso(),
+    nowIso(),
+  );
+}
+
 function callbackUrl(configuredUrl, broker, mobile, brokerId) {
   const base = configuredUrl || `http://localhost:8080/api/callback/${broker}`;
   const url = new URL(base);
   url.searchParams.set('mobile', mobile);
   if (brokerId) url.searchParams.set('brokerId', brokerId);
+  return url.toString();
+}
+
+function adminCallbackUrl(configuredUrl, publicApiBase) {
+  const base = configuredUrl || `${publicApiBase || process.env.PUBLIC_API_BASE || 'http://localhost:8080'}/api/callback/fyers`;
+  const url = new URL(base);
+  url.searchParams.set('admin', '1');
   return url.toString();
 }
 
