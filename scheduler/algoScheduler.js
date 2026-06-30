@@ -22,7 +22,7 @@ export function enableAlgoSchedulers() {
 function configureDailyGannJob() {
   dailyGannJob?.cancel();
   dailyGannJob = schedule.scheduleJob({ hour: 9, minute: 14, tz: 'Asia/Kolkata' }, async () => {
-    const settings = getSettings();
+    const settings = await getSettings();
     if (!settings.intraday_enabled && !settings.swing_enabled) return;
     await calculateAndStoreDailyGannLevels({ tradeDate: moment().format('YYYY-MM-DD') });
   });
@@ -31,7 +31,7 @@ function configureDailyGannJob() {
 function configureIntradayJob() {
   intradayJob?.cancel();
   intradayJob = schedule.scheduleJob('*/15 * * * *', async () => {
-    const settings = getSettings();
+    const settings = await getSettings();
     if (!settings.intraday_enabled) return;
     const now = moment();
     const start = moment({ hour: 9, minute: 15 });
@@ -58,7 +58,7 @@ function configureIntradayJob() {
 function configureForceCloseJob() {
   forceCloseJob?.cancel();
   forceCloseJob = schedule.scheduleJob({ hour: 15, minute: 15, tz: 'Asia/Kolkata' }, async () => {
-    const settings = getSettings();
+    const settings = await getSettings();
     if (!settings.swing_enabled) {
       await forceCloseIntradayOrders();
     }
@@ -68,7 +68,7 @@ function configureForceCloseJob() {
 function configureSwingJob() {
   swingJob?.cancel();
   swingJob = schedule.scheduleJob({ hour: 15, minute: 20, tz: 'Asia/Kolkata' }, async () => {
-    const settings = getSettings();
+    const settings = await getSettings();
     if (!settings.swing_enabled) return;
     // Swing execution is daily and long-only. Historical/backtest logic is implemented
     // in strategyEngine; live order trigger is intentionally conservative until the

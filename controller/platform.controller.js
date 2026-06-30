@@ -280,10 +280,10 @@ async function handleBrokerCallbackPage(res, role, fn) {
   }
 }
 
-function redirectToFrontend(res, params) {
+async function redirectToFrontend(res, params) {
   let frontendUrl = process.env.FRONTEND_URL || 'https://algo.foodcrisis.in';
   try {
-    frontendUrl = getSettings().frontend_url || frontendUrl;
+    frontendUrl = (await getSettings()).frontend_url || frontendUrl;
   } catch {
     // Keep callback response available even if settings cannot be loaded.
   }

@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import Mysql from 'sync-mysql';
+import mysql from 'mysql2/promise';
 import { createRequire } from 'module';
 import path from 'path';
 
@@ -11,14 +11,18 @@ let db;
 
 
 function createMysqlDb() {
-  return new MysqlCompatDb({
+  return new MysqlCompatDb(mysql.createPool({
     host: process.env.MYSQL_HOST || process.env.DB_HOST || 'localhost',
     user: process.env.MYSQL_USER || process.env.DB_USER,
     password: process.env.MYSQL_PASSWORD || process.env.DB_PASSWORD,
     database: process.env.MYSQL_DATABASE || process.env.DB_NAME,
     port: Number(process.env.MYSQL_PORT || process.env.DB_PORT || 3306),
     timezone: process.env.MYSQL_TIMEZONE || '+05:30',
-  });
+    waitForConnections: true,
+    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 4),
+    queueLimit: 0,
+    namedPlaceholders: false,
+  }));
 }
 
 function createSqliteDb() {
@@ -27,21 +31,21 @@ function createSqliteDb() {
 }
 
 class MysqlCompatDb {
-  constructor(config) {
-    if (!config.user || !config.database) {
+  constructor(pool) {
+    if (!process.env.MYSQL_USER && !process.env.DB_USER) {
       this.configError = 'MySQL mode requires MYSQL_USER and MYSQL_DATABASE.';
-      this.connection = null;
+      this.pool = null;
       return;
     }
-    this.connection = new Mysql(config);
+    this.pool = pool;
   }
 
-  exec(sql) {
+  async exec(sql) {
     this.assertReady();
     for (const statement of splitSqlStatements(sql)) {
       const next = this.normalizeSql(statement);
       if (!next) continue;
-      this.connection.query(next);
+      await this.pool.query(next);
     }
   }
 
@@ -52,51 +56,131 @@ class MysqlCompatDb {
     const normalized = this.normalizeSql(sql);
     return {
       run: (...params) => {
-        const result = this.connection.query(normalized, normalizeMysqlParams(params));
-        return {
+        return this.pool.query(normalized, normalizeMysqlParams(params)).then(([result]) => ({
           lastInsertRowid: result?.insertId || 0,
           changes: result?.affectedRows || 0,
-        };
+        }));
       },
-      all: (...params) => normalizeMysqlRows(this.connection.query(normalized, normalizeMysqlParams(params))),
-      get: (...params) => normalizeMysqlRows(this.connection.query(normalized, normalizeMysqlParams(params)))[0],
+      all: (...params) => this.pool.query(normalized, normalizeMysqlParams(params)).then(([rows]) => normalizeMysqlRows(rows)),
+      get: (...params) => this.pool.query(normalized, normalizeMysqlParams(params)).then(([rows]) => normalizeMysqlRows(rows)[0]),
     };
+  }
+
+  async run(sql, params = []) {
+    const result = await this.pool.query(this.normalizeSql(sql), normalizeMysqlParams(params));
+    return {
+      lastInsertRowid: result?.[0]?.insertId || 0,
+      changes: result?.[0]?.affectedRows || 0,
+    };
+  }
+
+  async all(sql, params = []) {
+    const [rows] = await this.pool.query(this.normalizeSql(sql), normalizeMysqlParams(params));
+    return normalizeMysqlRows(rows);
+  }
+
+  async get(sql, params = []) {
+    return (await this.all(sql, params))[0];
   }
 
   preparePragma(pragma) {
     return {
-      run: () => ({ lastInsertRowid: 0, changes: 0 }),
-      get: () => this.queryPragma(pragma)[0],
-      all: () => this.queryPragma(pragma),
+      run: async () => ({ lastInsertRowid: 0, changes: 0 }),
+      get: async () => (await this.queryPragma(pragma))[0],
+      all: async () => this.queryPragma(pragma),
     };
   }
 
-  queryPragma({ name, table }) {
+  async queryPragma({ name, table }) {
     this.assertReady();
     if (name === 'table_info') {
-      return this.connection.query(`
+      const [rows] = await this.pool.query(`
         SELECT COLUMN_NAME AS name
         FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
         ORDER BY ORDINAL_POSITION
       `, [table]);
+      return normalizeMysqlRows(rows);
     }
     if (name === 'index_list') {
-      return this.connection.query(`
-        SELECT INDEX_NAME AS name, CASE WHEN NON_UNIQUE = 0 THEN 1 ELSE 0 END AS unique
+      const [rows] = await this.pool.query(`
+        SELECT INDEX_NAME AS name, CASE WHEN NON_UNIQUE = 0 THEN 1 ELSE 0 END AS \`unique\`
         FROM information_schema.STATISTICS
         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
         GROUP BY INDEX_NAME, NON_UNIQUE
       `, [table]);
+      return normalizeMysqlRows(rows);
     }
     return [];
   }
 
   assertReady() {
     if (this.configError) throw new Error(this.configError);
-    if (!this.connection) throw new Error('MySQL connection is not initialized.');
+    if (!this.pool) throw new Error('MySQL connection is not initialized.');
   }
 
+  normalizeSql(sql) {
+    let next = sql.trim();
+    if (!next || next.startsWith('--')) return '';
+    if (/^PRAGMA/i.test(next)) return '';
+    next = normalizeMysqlDdl(next);
+    next = normalizeMysqlUpsert(next);
+    next = quoteMysqlAppSettingsKey(next);
+    next = normalizeMysqlExpressions(next);
+    next = next.replace(/DATE\('now'\)/gi, 'CURRENT_DATE()');
+    return next;
+  }
+}
+
+class SqliteCompatDb {
+  constructor(dbInstance) {
+    this.db = dbInstance;
+  }
+
+  exec(sql) {
+    return this.db.exec(sql);
+  }
+
+  prepare(sql) {
+    return this.db.prepare(sql);
+  }
+
+  run(sql, params = []) {
+    const result = this.db.prepare(sql).run(...params);
+    return {
+      lastInsertRowid: result?.lastInsertRowid || 0,
+      changes: result?.changes || 0,
+    };
+  }
+
+  all(sql, params = []) {
+    return this.db.prepare(sql).all(...params);
+  }
+
+  get(sql, params = []) {
+    return this.db.prepare(sql).get(...params);
+  }
+}
+
+/*
+  The MySQL adapter intentionally uses mysql2/promise. Hostinger shared Node
+  hosting cannot run sync-mysql's sync-rpc child worker reliably, which caused
+  nodeNC startup failures during database init.
+*/
+
+class LegacyMysqlCompatDb {
+  prepare() {
+    return {
+      run: () => {
+        return {
+          lastInsertRowid: 0,
+          changes: 0,
+        };
+      },
+      all: () => [],
+      get: () => undefined,
+    };
+  }
   normalizeSql(sql) {
     let next = sql.trim();
     if (!next || next.startsWith('--')) return '';
@@ -216,15 +300,15 @@ function normalizeMysqlExpressions(sql) {
   );
 }
 
-db = isMysql ? createMysqlDb() : createSqliteDb();
+db = isMysql ? createMysqlDb() : new SqliteCompatDb(createSqliteDb());
 
 if (!isMysql) {
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
 }
 
-export function initDatabase() {
-  db.exec(`
+export async function initDatabase() {
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       mobile TEXT NOT NULL UNIQUE,
@@ -500,12 +584,12 @@ export function initDatabase() {
     );
   `);
 
-  applyLightweightMigrations();
-  seedDefaults();
+  await applyLightweightMigrations();
+  await seedDefaults();
 }
 
-function applyLightweightMigrations() {
-  const columns = db.prepare('PRAGMA table_info(users)').all().map((column) => column.name);
+async function applyLightweightMigrations() {
+  const columns = (await db.prepare('PRAGMA table_info(users)').all()).map((column) => column.name);
   const migrations = [
     ['intraday_wallet', 'ALTER TABLE users ADD COLUMN intraday_wallet REAL NOT NULL DEFAULT 100000'],
     ['swing_wallet', 'ALTER TABLE users ADD COLUMN swing_wallet REAL NOT NULL DEFAULT 100000'],
@@ -513,30 +597,30 @@ function applyLightweightMigrations() {
   ];
 
   for (const [column, sql] of migrations) {
-    if (!columns.includes(column)) db.exec(sql);
+    if (!columns.includes(column)) await db.exec(sql);
   }
 
-  migrateUserBrokersForMultipleAccounts();
-  addColumnIfMissing('user_brokers', 'label', 'ALTER TABLE user_brokers ADD COLUMN label TEXT');
-  addColumnIfMissing('user_brokers', 'is_active', 'ALTER TABLE user_brokers ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0');
-  addColumnIfMissing('instruments', 'last_sync_at', 'ALTER TABLE instruments ADD COLUMN last_sync_at TEXT');
-  addColumnIfMissing('instruments', 'sync_status', "ALTER TABLE instruments ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'idle'");
-  addColumnIfMissing('instruments', 'sync_progress', 'ALTER TABLE instruments ADD COLUMN sync_progress INTEGER NOT NULL DEFAULT 0');
-  addColumnIfMissing('strategy_catalog', 'settings_json', "ALTER TABLE strategy_catalog ADD COLUMN settings_json TEXT NOT NULL DEFAULT '{}'");
+  await migrateUserBrokersForMultipleAccounts();
+  await addColumnIfMissing('user_brokers', 'label', 'ALTER TABLE user_brokers ADD COLUMN label TEXT');
+  await addColumnIfMissing('user_brokers', 'is_active', 'ALTER TABLE user_brokers ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0');
+  await addColumnIfMissing('instruments', 'last_sync_at', 'ALTER TABLE instruments ADD COLUMN last_sync_at TEXT');
+  await addColumnIfMissing('instruments', 'sync_status', "ALTER TABLE instruments ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'idle'");
+  await addColumnIfMissing('instruments', 'sync_progress', 'ALTER TABLE instruments ADD COLUMN sync_progress INTEGER NOT NULL DEFAULT 0');
+  await addColumnIfMissing('strategy_catalog', 'settings_json', "ALTER TABLE strategy_catalog ADD COLUMN settings_json TEXT NOT NULL DEFAULT '{}'");
 }
 
-function addColumnIfMissing(table, column, sql) {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((item) => item.name);
-  if (!columns.includes(column)) db.exec(sql);
+async function addColumnIfMissing(table, column, sql) {
+  const columns = (await db.prepare(`PRAGMA table_info(${table})`).all()).map((item) => item.name);
+  if (!columns.includes(column)) await db.exec(sql);
 }
 
-function migrateUserBrokersForMultipleAccounts() {
+async function migrateUserBrokersForMultipleAccounts() {
   if (isMysql) return;
-  const indexes = db.prepare('PRAGMA index_list(user_brokers)').all();
+  const indexes = await db.prepare('PRAGMA index_list(user_brokers)').all();
   const hasUniqueBrokerIndex = indexes.some((item) => item.unique === 1);
   if (!hasUniqueBrokerIndex) return;
 
-  db.exec(`
+  await db.exec(`
     PRAGMA foreign_keys = OFF;
     CREATE TABLE IF NOT EXISTS user_brokers_new (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -572,7 +656,7 @@ function migrateUserBrokersForMultipleAccounts() {
   `);
 }
 
-function seedDefaults() {
+async function seedDefaults() {
   const defaults = [
     ['intraday_enabled', 'true'],
     ['swing_enabled', 'false'],
@@ -602,7 +686,9 @@ function seedDefaults() {
     VALUES (?, ?)
     ON CONFLICT(key) DO NOTHING
   `);
-  defaults.forEach(([key, value]) => stmt.run(key, value));
+  for (const [key, value] of defaults) {
+    await stmt.run(key, value);
+  }
 
   const strategies = [
     ['intraday_gann_15m', 'GANN Breakout Intraday', 'intraday', 'BOTH', '15m', 50000, JSON.stringify({ emaFilter: false, targetLevels: [1, 2, 3, 4, 5] }), '15-minute GANN breakout strategy for intraday momentum.'],
@@ -623,7 +709,9 @@ function seedDefaults() {
       description = excluded.description,
       updated_at = CURRENT_TIMESTAMP
   `);
-  strategies.forEach((strategy) => strategyStmt.run(...strategy));
+  for (const strategy of strategies) {
+    await strategyStmt.run(...strategy);
+  }
 }
 
 export function getDb() {

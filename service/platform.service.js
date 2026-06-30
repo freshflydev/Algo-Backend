@@ -9,31 +9,31 @@ import { DEFAULT_STOCKS_NAMES } from '../Config.js';
 
 moment.tz.setDefault('Asia/Kolkata');
 
-export function getSettings() {
-  const rows = getDb().prepare('SELECT key, value FROM app_settings ORDER BY key').all();
+export async function getSettings() {
+  const rows = await getDb().prepare('SELECT key, value FROM app_settings ORDER BY key').all();
   return rows.reduce((acc, row) => {
     acc[row.key] = parseSetting(row.value);
     return acc;
   }, {});
 }
 
-export function updateSettings(settings) {
+export async function updateSettings(settings) {
   const stmt = getDb().prepare(`
     INSERT INTO app_settings(key, value, updated_at)
     VALUES (?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
   `);
-  Object.entries(settings || {}).forEach(([key, value]) => {
-    stmt.run(key, String(value), nowIso());
-  });
-  syncAdminBrokerSettings(settings);
+  for (const [key, value] of Object.entries(settings || {})) {
+    await stmt.run(key, String(value), nowIso());
+  }
+  await syncAdminBrokerSettings(settings);
   return getSettings();
 }
 
-export function addInstrument({ symbol, category = 'stock', segment = 'NSE', instrumentType = '-EQ' }) {
+export async function addInstrument({ symbol, category = 'stock', segment = 'NSE', instrumentType = '-EQ' }) {
   const normalized = symbol.toUpperCase();
   const derived = inferInstrumentDefaults(normalized, { category, segment, instrumentType });
-  getDb().prepare(`
+  await getDb().prepare(`
     INSERT INTO instruments(symbol, segment, instrument_type, category, sync_status, sync_progress)
     VALUES (?, ?, ?, ?, 'idle', 0)
     ON CONFLICT(symbol) DO UPDATE SET enabled = 1, segment = excluded.segment, instrument_type = excluded.instrument_type, category = excluded.category
@@ -41,20 +41,20 @@ export function addInstrument({ symbol, category = 'stock', segment = 'NSE', ins
   return getInstrument(normalized);
 }
 
-export function addInstrumentWithInitialSync(payload) {
-  const instrument = addInstrument(payload);
+export async function addInstrumentWithInitialSync(payload) {
+  const instrument = await addInstrument(payload);
   const rangeTo = moment().format('YYYY-MM-DD');
   const rangeFrom = moment().subtract(2, 'months').format('YYYY-MM-DD');
   fetchAndStoreCandles({ symbol: instrument.symbol, resolution: 'D', rangeFrom, rangeTo })
     .catch((error) => {
-      markInstrumentSync(instrument.symbol, 'error', 0);
+      void markInstrumentSync(instrument.symbol, 'error', 0);
       console.error(`Initial sync failed for ${instrument.symbol}:`, error.message || error);
     });
   return { ...instrument, sync_status: 'syncing', sync_progress: 0 };
 }
 
-export function listInstruments(category) {
-  seedDefaultInstruments();
+export async function listInstruments(category) {
+  await seedDefaultInstruments();
   const selectSql = `
     SELECT
       i.*,
@@ -78,35 +78,35 @@ export function listInstruments(category) {
   return getDb().prepare(`${selectSql} ORDER BY i.category, i.symbol`).all();
 }
 
-export function disableInstrument(symbol) {
-  getDb().prepare('UPDATE instruments SET enabled = 0 WHERE symbol = ?').run(symbol.toUpperCase());
+export async function disableInstrument(symbol) {
+  await getDb().prepare('UPDATE instruments SET enabled = 0 WHERE symbol = ?').run(symbol.toUpperCase());
   return listInstruments();
 }
 
-export function upsertUser({ mobile, name, targetLevel = 1 }) {
-  getDb().prepare(`
+export async function upsertUser({ mobile, name, targetLevel = 1 }) {
+  await getDb().prepare(`
     INSERT INTO users(mobile, name, target_level, updated_at)
     VALUES (?, ?, ?, ?)
     ON CONFLICT(mobile) DO UPDATE SET name = excluded.name, target_level = excluded.target_level, updated_at = excluded.updated_at
   `).run(mobile, name || null, normalizeTargetLevel(targetLevel), nowIso());
-  const user = getUserByMobile(mobile);
-  ensureUserStrategyConfig(user.id);
-  ensureDefaultSubscriptions(user.id);
+  const user = await getUserByMobile(mobile);
+  await ensureUserStrategyConfig(user.id);
+  await ensureDefaultSubscriptions(user.id);
   return user;
 }
 
-export function loginWithMobile({ mobile, name }) {
+export async function loginWithMobile({ mobile, name }) {
   if (!mobile) throw new Error('Mobile is required.');
   const role = mobile === '9999999999' ? 'admin' : 'user';
-  let user = getUserByMobile(mobile);
-  if (!user) user = upsertUser({ mobile, name: name || (role === 'admin' ? 'Admin' : null) });
-  ensureUserStrategyConfig(user.id);
-  ensureDefaultSubscriptions(user.id);
-  recordLogin(user.id, mobile, role, 'success', 'Mobile login');
-  return { role, user, lastLoginAt: lastLoginAt(mobile) };
+  let user = await getUserByMobile(mobile);
+  if (!user) user = await upsertUser({ mobile, name: name || (role === 'admin' ? 'Admin' : null) });
+  await ensureUserStrategyConfig(user.id);
+  await ensureDefaultSubscriptions(user.id);
+  await recordLogin(user.id, mobile, role, 'success', 'Mobile login');
+  return { role, user, lastLoginAt: await lastLoginAt(mobile) };
 }
 
-export function listLoginHistory({ mobile, limit = 20 } = {}) {
+export async function listLoginHistory({ mobile, limit = 20 } = {}) {
   const params = [];
   const where = mobile ? 'WHERE mobile = ?' : '';
   if (mobile) params.push(mobile);
@@ -120,16 +120,16 @@ export function listLoginHistory({ mobile, limit = 20 } = {}) {
   `).all(...params);
 }
 
-export function getUserStrategyConfig(mobile) {
-  const user = requireUser(mobile);
-  ensureUserStrategyConfig(user.id);
+export async function getUserStrategyConfig(mobile) {
+  const user = await requireUser(mobile);
+  await ensureUserStrategyConfig(user.id);
   return getDb().prepare('SELECT * FROM user_strategy_configs WHERE user_id = ?').get(user.id);
 }
 
-export function updateUserStrategyConfig(mobile, config) {
-  const user = requireUser(mobile);
-  ensureUserStrategyConfig(user.id);
-  const current = getUserStrategyConfig(mobile);
+export async function updateUserStrategyConfig(mobile, config) {
+  const user = await requireUser(mobile);
+  await ensureUserStrategyConfig(user.id);
+  const current = await getUserStrategyConfig(mobile);
   const next = {
     intraday_enabled: toDbBool(config.intradayEnabled ?? current.intraday_enabled),
     intraday_scope: config.intradayScope || current.intraday_scope,
@@ -143,7 +143,7 @@ export function updateUserStrategyConfig(mobile, config) {
     swing_leverage: Number(config.swingLeverage ?? current.swing_leverage),
   };
 
-  getDb().prepare(`
+  await getDb().prepare(`
     UPDATE user_strategy_configs SET
       intraday_enabled = ?,
       intraday_scope = ?,
@@ -174,8 +174,8 @@ export function updateUserStrategyConfig(mobile, config) {
   return getUserStrategyConfig(mobile);
 }
 
-export function listUserWatchlist(mobile) {
-  const user = requireUser(mobile);
+export async function listUserWatchlist(mobile) {
+  const user = await requireUser(mobile);
   return getDb().prepare(`
     SELECT symbol, watchlist_name, created_at
     FROM user_watchlists
@@ -184,11 +184,11 @@ export function listUserWatchlist(mobile) {
   `).all(user.id);
 }
 
-export function addUserWatchlistSymbol(mobile, { symbol, watchlistName = 'default' }) {
-  const user = requireUser(mobile);
+export async function addUserWatchlistSymbol(mobile, { symbol, watchlistName = 'default' }) {
+  const user = await requireUser(mobile);
   const normalized = symbol.toUpperCase();
-  if (!getInstrument(normalized)) addInstrument({ symbol: normalized });
-  getDb().prepare(`
+  if (!await getInstrument(normalized)) await addInstrument({ symbol: normalized });
+  await getDb().prepare(`
     INSERT INTO user_watchlists(user_id, symbol, watchlist_name)
     VALUES (?, ?, ?)
     ON CONFLICT(user_id, symbol, watchlist_name) DO NOTHING
@@ -196,22 +196,22 @@ export function addUserWatchlistSymbol(mobile, { symbol, watchlistName = 'defaul
   return listUserWatchlist(mobile);
 }
 
-export function removeUserWatchlistSymbol(mobile, symbol, watchlistName = 'default') {
-  const user = requireUser(mobile);
-  getDb().prepare(`
+export async function removeUserWatchlistSymbol(mobile, symbol, watchlistName = 'default') {
+  const user = await requireUser(mobile);
+  await getDb().prepare(`
     DELETE FROM user_watchlists
     WHERE user_id = ? AND symbol = ? AND watchlist_name = ?
   `).run(user.id, symbol.toUpperCase(), watchlistName);
   return listUserWatchlist(mobile);
 }
 
-export function updateUserBroker(mobile, payload) {
+export async function updateUserBroker(mobile, payload) {
   assertBrokerMutationAllowed();
-  const user = requireUser(mobile);
+  const user = await requireUser(mobile);
   const broker = payload.broker?.toLowerCase();
   if (!['fyers', 'upstox'].includes(broker)) throw new Error('Broker must be fyers or upstox.');
   if (payload.id) {
-    getDb().prepare(`
+    await getDb().prepare(`
       UPDATE user_brokers
       SET broker = ?, label = ?, api_key = ?, secret_key = ?, redirect_url = ?, updated_at = ?
       WHERE id = ? AND user_id = ?
@@ -219,15 +219,15 @@ export function updateUserBroker(mobile, payload) {
     return getUserBrokerById(user.id, payload.id);
   }
 
-  const result = getDb().prepare(`
+  const result = await getDb().prepare(`
     INSERT INTO user_brokers(user_id, broker, label, api_key, secret_key, redirect_url, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(user.id, broker, payload.label || broker, payload.apiKey, payload.secretKey, payload.redirectUrl || null, nowIso());
   return getUserBrokerById(user.id, result.lastInsertRowid);
 }
 
-export function listUserBrokers(mobile) {
-  const user = requireUser(mobile);
+export async function listUserBrokers(mobile) {
+  const user = await requireUser(mobile);
   return getDb().prepare(`
     SELECT id, broker, label, api_key, redirect_url, token_expires_at, connected_at, is_connected, is_active, created_at, updated_at
     FROM user_brokers
@@ -236,18 +236,18 @@ export function listUserBrokers(mobile) {
   `).all(user.id);
 }
 
-export function setActiveUserBroker(mobile, brokerId) {
-  const user = requireUser(mobile);
-  const account = getUserBrokerById(user.id, brokerId);
+export async function setActiveUserBroker(mobile, brokerId) {
+  const user = await requireUser(mobile);
+  const account = await getUserBrokerById(user.id, brokerId);
   if (!account) throw new Error('Broker account not found.');
-  getDb().prepare('UPDATE user_brokers SET is_active = 0, updated_at = ? WHERE user_id = ?').run(nowIso(), user.id);
-  getDb().prepare('UPDATE user_brokers SET is_active = 1, updated_at = ? WHERE id = ? AND user_id = ?').run(nowIso(), brokerId, user.id);
+  await getDb().prepare('UPDATE user_brokers SET is_active = 0, updated_at = ? WHERE user_id = ?').run(nowIso(), user.id);
+  await getDb().prepare('UPDATE user_brokers SET is_active = 1, updated_at = ? WHERE id = ? AND user_id = ?').run(nowIso(), brokerId, user.id);
   return listUserBrokers(mobile);
 }
 
-export function disconnectUserBroker(mobile, brokerId) {
-  const user = requireUser(mobile);
-  getDb().prepare(`
+export async function disconnectUserBroker(mobile, brokerId) {
+  const user = await requireUser(mobile);
+  await getDb().prepare(`
     UPDATE user_brokers
     SET is_connected = 0, access_token = NULL, refresh_token = NULL, auth_code = NULL, token_expires_at = NULL, updated_at = ?
     WHERE id = ? AND user_id = ?
@@ -255,17 +255,17 @@ export function disconnectUserBroker(mobile, brokerId) {
   return listUserBrokers(mobile);
 }
 
-export function removeUserBroker(mobile, brokerId) {
-  const user = requireUser(mobile);
-  getDb().prepare('DELETE FROM user_brokers WHERE id = ? AND user_id = ?').run(brokerId, user.id);
+export async function removeUserBroker(mobile, brokerId) {
+  const user = await requireUser(mobile);
+  await getDb().prepare('DELETE FROM user_brokers WHERE id = ? AND user_id = ?').run(brokerId, user.id);
   return listUserBrokers(mobile);
 }
 
 export async function connectUserBroker(mobile, brokerNameOrId) {
-  const user = requireUser(mobile);
+  const user = await requireUser(mobile);
   const broker = Number(brokerNameOrId)
-    ? getUserBrokerById(user.id, Number(brokerNameOrId))
-    : getActiveOrNamedUserBroker(user.id, brokerNameOrId?.toLowerCase());
+    ? await getUserBrokerById(user.id, Number(brokerNameOrId))
+    : await getActiveOrNamedUserBroker(user.id, brokerNameOrId?.toLowerCase());
   if (!broker) throw new Error('Broker credentials not found for user.');
   if (broker.broker === 'fyers') {
     const fyers = new FyersAPI.fyersModel();
@@ -281,13 +281,13 @@ export async function connectUserBroker(mobile, brokerNameOrId) {
 }
 
 export async function connectAdminDataSource() {
-  const settings = getSettings();
+  const settings = await getSettings();
   const broker = settings.data_source_broker || 'fyers';
   if (broker !== 'fyers') throw new Error('Only Fyers is supported as data source broker.');
   if (!settings.data_source_api_key || !settings.data_source_secret_key) {
     throw new Error('Save Fyers API key and secret before connecting data source.');
   }
-  syncAdminBrokerSettings(settings);
+  await syncAdminBrokerSettings(settings);
   const redirectUrl = adminCallbackUrl(settings.data_source_redirect_url, settings.public_api_base);
   const fyers = new FyersAPI.fyersModel();
   fyers.setAppId(settings.data_source_api_key);
@@ -296,7 +296,7 @@ export async function connectAdminDataSource() {
 }
 
 export async function completeAdminBrokerCallback({ code }) {
-  const settings = getSettings();
+  const settings = await getSettings();
   if (!settings.data_source_api_key || !settings.data_source_secret_key) {
     throw new Error('Admin data source credentials are not saved.');
   }
@@ -310,7 +310,7 @@ export async function completeAdminBrokerCallback({ code }) {
     auth_code: code,
   });
   if (data.code && data.code !== 200) throw new Error(data.message || 'Fyers token exchange failed.');
-  upsertAdminBrokerTokens({
+  await upsertAdminBrokerTokens({
     apiKey: settings.data_source_api_key,
     secretKey: settings.data_source_secret_key,
     redirectUrl,
@@ -318,7 +318,7 @@ export async function completeAdminBrokerCallback({ code }) {
     accessToken: data.access_token,
     refreshToken: data.refresh_token,
   });
-  updateSettings({
+  await updateSettings({
     data_source_status: 'connected',
     data_source_access_token: data.access_token,
     data_source_refresh_token: data.refresh_token || '',
@@ -327,8 +327,8 @@ export async function completeAdminBrokerCallback({ code }) {
 }
 
 export async function completeUserBrokerCallback({ broker, mobile, code, brokerId }) {
-  const user = requireUser(mobile);
-  const account = brokerId ? getUserBrokerById(user.id, Number(brokerId)) : getActiveOrNamedUserBroker(user.id, broker);
+  const user = await requireUser(mobile);
+  const account = brokerId ? await getUserBrokerById(user.id, Number(brokerId)) : await getActiveOrNamedUserBroker(user.id, broker);
   if (!account) throw new Error('Broker credentials not found for callback.');
 
   if (broker === 'fyers') {
@@ -341,7 +341,7 @@ export async function completeUserBrokerCallback({ broker, mobile, code, brokerI
       auth_code: code,
     });
     if (data.code && data.code !== 200) throw new Error(data.message || 'Fyers token exchange failed.');
-    saveBrokerTokens(account.id, code, data.access_token, data.refresh_token);
+    await saveBrokerTokens(account.id, code, data.access_token, data.refresh_token);
     return { broker, connected: true };
   }
 
@@ -361,18 +361,18 @@ export async function completeUserBrokerCallback({ broker, mobile, code, brokerI
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data?.message || 'Upstox token exchange failed.');
-  saveBrokerTokens(account.id, code, data.access_token, data.refresh_token);
+  await saveBrokerTokens(account.id, code, data.access_token, data.refresh_token);
   return { broker, connected: true };
 }
 
-export function startUserInstance(mobile) {
+export async function startUserInstance(mobile) {
   assertInstanceWindow();
-  const user = requireUser(mobile);
-  const connectedBroker = getDb().prepare(`
+  const user = await requireUser(mobile);
+  const connectedBroker = await getDb().prepare(`
     SELECT * FROM user_brokers WHERE user_id = ? AND is_connected = 1 LIMIT 1
   `).get(user.id);
   if (!connectedBroker) throw new Error('User must connect broker before starting algo.');
-  getDb().prepare(`
+  await getDb().prepare(`
     INSERT INTO algo_instances(user_id, status, started_at, updated_at)
     VALUES (?, 'running', ?, ?)
     ON CONFLICT(user_id) DO UPDATE SET status = 'running', started_at = excluded.started_at, stopped_at = NULL, updated_at = excluded.updated_at
@@ -380,9 +380,9 @@ export function startUserInstance(mobile) {
   return getUserInstance(mobile);
 }
 
-export function stopUserInstance(mobile) {
-  const user = requireUser(mobile);
-  getDb().prepare(`
+export async function stopUserInstance(mobile) {
+  const user = await requireUser(mobile);
+  await getDb().prepare(`
     INSERT INTO algo_instances(user_id, status, stopped_at, updated_at)
     VALUES (?, 'stopped', ?, ?)
     ON CONFLICT(user_id) DO UPDATE SET status = 'stopped', stopped_at = excluded.stopped_at, updated_at = excluded.updated_at
@@ -390,15 +390,15 @@ export function stopUserInstance(mobile) {
   return getUserInstance(mobile);
 }
 
-export function getUserInstance(mobile) {
-  const user = requireUser(mobile);
-  return getDb().prepare('SELECT * FROM algo_instances WHERE user_id = ?').get(user.id) || { user_id: user.id, status: 'stopped' };
+export async function getUserInstance(mobile) {
+  const user = await requireUser(mobile);
+  return await getDb().prepare('SELECT * FROM algo_instances WHERE user_id = ?').get(user.id) || { user_id: user.id, status: 'stopped' };
 }
 
-export function listStrategiesForUser(mobile) {
-  const user = requireUser(mobile);
-  ensureDefaultSubscriptions(user.id);
-  return getDb().prepare(`
+export async function listStrategiesForUser(mobile) {
+  const user = await requireUser(mobile);
+  await ensureDefaultSubscriptions(user.id);
+  const rows = await getDb().prepare(`
     SELECT
       sc.*,
       us.enabled AS subscribed,
@@ -422,19 +422,20 @@ export function listStrategiesForUser(mobile) {
     ) perf ON perf.strategy = sc.code
     WHERE sc.enabled = 1
     ORDER BY sc.mode, sc.name
-  `).all(user.id).map(parseStrategyRow);
+  `).all(user.id);
+  return rows.map(parseStrategyRow);
 }
 
-export function listUserStrategyHistory(mobile, strategyCode) {
-  const user = requireUser(mobile);
-  const watchlist = getDb().prepare(`
+export async function listUserStrategyHistory(mobile, strategyCode) {
+  const user = await requireUser(mobile);
+  const watchlist = (await getDb().prepare(`
     SELECT symbol FROM user_watchlists
     WHERE user_id = ?
     ORDER BY symbol
-  `).all(user.id).map((row) => row.symbol);
+  `).all(user.id)).map((row) => row.symbol);
   const watchlistSet = new Set(watchlist);
 
-  const trades = getDb().prepare(`
+  const trades = await getDb().prepare(`
     SELECT strategy, symbol, side, quantity, entry_price, exit_price, exit_reason, status, order_tag, entered_at, exited_at
     FROM orders
     WHERE user_id = ? AND strategy = ?
@@ -442,23 +443,23 @@ export function listUserStrategyHistory(mobile, strategyCode) {
     LIMIT 100
   `).all(user.id, strategyCode);
 
-  const backtests = getDb().prepare(`
+  const backtests = (await getDb().prepare(`
     SELECT id, strategy, symbol, range_from, range_to, stats_json, created_at
     FROM backtests
     WHERE strategy = ?
     ORDER BY created_at DESC
     LIMIT 100
-  `).all(strategyCode)
+  `).all(strategyCode))
     .filter((row) => watchlistSet.size === 0 || watchlistSet.has(row.symbol))
     .map((row) => ({ ...row, stats: safeJson(row.stats_json), stats_json: undefined }));
 
   return { watchlist, trades, backtests };
 }
 
-export function updateUserStrategySubscription(mobile, strategyCode, payload) {
-  const user = requireUser(mobile);
+export async function updateUserStrategySubscription(mobile, strategyCode, payload) {
+  const user = await requireUser(mobile);
   const targetLevel = normalizeTargetLevel(payload.targetLevel || 1);
-  getDb().prepare(`
+  await getDb().prepare(`
     INSERT INTO user_strategy_subscriptions(user_id, strategy_code, target_level, enabled, updated_at)
     VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(user_id, strategy_code) DO UPDATE SET
@@ -469,8 +470,8 @@ export function updateUserStrategySubscription(mobile, strategyCode, payload) {
   return listStrategiesForUser(mobile);
 }
 
-export function listStrategiesAdmin() {
-  return getDb().prepare(`
+export async function listStrategiesAdmin() {
+  const rows = await getDb().prepare(`
     SELECT
       sc.*,
       COALESCE(perf.runs, 0) AS runs,
@@ -487,12 +488,13 @@ export function listStrategiesAdmin() {
       GROUP BY strategy
     ) perf ON perf.strategy = sc.code
     ORDER BY sc.mode, sc.name
-  `).all().map(parseStrategyRow);
+  `).all();
+  return rows.map(parseStrategyRow);
 }
 
-export function updateStrategyAdmin(code, payload) {
+export async function updateStrategyAdmin(code, payload) {
   const settings = normalizeStrategySettings(payload.settings || payload.settings_json || {});
-  getDb().prepare(`
+  await getDb().prepare(`
     UPDATE strategy_catalog
     SET name = ?, mode = ?, direction = ?, timeframe = ?, min_capital = ?, enabled = ?, settings_json = ?, updated_at = ?
     WHERE code = ?
@@ -511,11 +513,11 @@ export function updateStrategyAdmin(code, payload) {
 }
 
 export async function fetchAndStoreCandles({ symbol, resolution = '15', rangeFrom, rangeTo, category }) {
-  const instruments = selectedSymbols(symbol, category);
+  const instruments = await selectedSymbolsAsync(symbol, category);
   const stored = [];
   for (let index = 0; index < instruments.length; index++) {
     const instrument = instruments[index];
-    markInstrumentSync(instrument.symbol, 'syncing', Math.round(index / instruments.length * 100));
+    await markInstrumentSync(instrument.symbol, 'syncing', Math.round(index / instruments.length * 100));
     const param = {
       instrument: instrument.symbol,
       segment: instrument.segment,
@@ -531,14 +533,14 @@ export async function fetchAndStoreCandles({ symbol, resolution = '15', rangeFro
     const data = transformCandel(history);
     const candles = arraysToCandles(data);
     storeCandles(instrument.symbol, resolution, candles);
-    markInstrumentSync(instrument.symbol, 'idle', 100);
+    await markInstrumentSync(instrument.symbol, 'idle', 100);
     stored.push({ symbol: instrument.symbol, count: candles.length });
   }
   return stored;
 }
 
 export async function calculateAndStoreDailyGannLevels({ symbol, category, tradeDate, sourceKind = 'day_open' }) {
-  const instruments = selectedSymbols(symbol, category);
+  const instruments = await selectedSymbolsAsync(symbol, category);
   const date = tradeDate || moment().format('YYYY-MM-DD');
   const results = [];
   for (const instrument of instruments) {
@@ -557,9 +559,9 @@ export async function calculateAndStoreDailyGannLevels({ symbol, category, trade
 }
 
 export async function backtestIntraday({ symbol, category, rangeFrom, rangeTo, targetLevel, useEma, slippagePercent, costPercent, sameCandlePolicy }) {
-  const instruments = selectedSymbols(symbol, category);
+  const instruments = await selectedSymbolsAsync(symbol, category);
   const results = [];
-  const maxCandleRangePercent = Number(getSettings().spike_candle_percent || 1.2);
+  const maxCandleRangePercent = Number((await getSettings()).spike_candle_percent || 1.2);
   for (const instrument of instruments) {
     let candles = getStoredCandles(instrument.symbol, '15', rangeFrom, rangeTo);
     if (candles.length === 0) {
@@ -574,9 +576,9 @@ export async function backtestIntraday({ symbol, category, rangeFrom, rangeTo, t
 }
 
 export async function backtestSwing({ symbol, category, rangeFrom, rangeTo, targetLevel, useEma, slippagePercent, costPercent, sameCandlePolicy }) {
-  const instruments = selectedSymbols(symbol, category);
+  const instruments = await selectedSymbolsAsync(symbol, category);
   const results = [];
-  const maxCandleRangePercent = Number(getSettings().spike_candle_percent || 1.2);
+  const maxCandleRangePercent = Number((await getSettings()).spike_candle_percent || 1.2);
   for (const instrument of instruments) {
     const fromWithWarmup = moment(rangeFrom).subtract(35, 'days').format('YYYY-MM-DD');
     let candles = getStoredCandles(instrument.symbol, 'D', fromWithWarmup, rangeTo);
@@ -592,9 +594,9 @@ export async function backtestSwing({ symbol, category, rangeFrom, rangeTo, targ
 }
 
 export async function backtestSwingHaDoji({ symbol, category, rangeFrom, rangeTo, useEma, slippagePercent, costPercent, sameCandlePolicy }) {
-  const instruments = selectedSymbols(symbol, category);
+  const instruments = await selectedSymbolsAsync(symbol, category);
   const results = [];
-  const maxCandleRangePercent = Number(getSettings().spike_candle_percent || 1.2);
+  const maxCandleRangePercent = Number((await getSettings()).spike_candle_percent || 1.2);
   for (const instrument of instruments) {
     const fromWithWarmup = moment(rangeFrom).subtract(35, 'days').format('YYYY-MM-DD');
     let candles = getStoredCandles(instrument.symbol, 'D', fromWithWarmup, rangeTo);
@@ -610,9 +612,9 @@ export async function backtestSwingHaDoji({ symbol, category, rangeFrom, rangeTo
 }
 
 export async function backtestIntradayHaDoji({ symbol, category, rangeFrom, rangeTo, useEma, slippagePercent, costPercent, sameCandlePolicy }) {
-  const instruments = selectedSymbols(symbol, category);
+  const instruments = await selectedSymbolsAsync(symbol, category);
   const results = [];
-  const maxCandleRangePercent = Number(getSettings().spike_candle_percent || 1.2);
+  const maxCandleRangePercent = Number((await getSettings()).spike_candle_percent || 1.2);
   for (const instrument of instruments) {
     let candles = getStoredCandles(instrument.symbol, '15', rangeFrom, rangeTo);
     if (candles.length === 0) {
@@ -627,9 +629,9 @@ export async function backtestIntradayHaDoji({ symbol, category, rangeFrom, rang
 }
 
 export async function backtestStrategyMatrix({ symbol, category = 'stock', rangeFrom, rangeTo, slippagePercent, costPercent, sameCandlePolicy }) {
-  const strategies = listStrategiesAdmin().filter((strategy) => strategy.enabled);
-  const instruments = selectedSymbols(symbol, category);
-  const maxCandleRangePercent = Number(getSettings().spike_candle_percent || 1.2);
+  const strategies = (await listStrategiesAdmin()).filter((strategy) => strategy.enabled);
+  const instruments = await selectedSymbolsAsync(symbol, category);
+  const maxCandleRangePercent = Number((await getSettings()).spike_candle_percent || 1.2);
   const byInstrument = [];
   const summary = [];
 
@@ -717,7 +719,7 @@ export async function backtestStrategyMatrix({ symbol, category = 'stock', range
   };
 }
 
-export function listTrades(filters = {}) {
+export async function listTrades(filters = {}) {
   const conditions = [];
   const params = [];
   if (filters.mobile) {
@@ -756,7 +758,7 @@ export function listTrades(filters = {}) {
   `).all(...params);
 }
 
-export function getActiveUsers() {
+export async function getActiveUsers() {
   return getDb().prepare(`
     SELECT u.*, ub.broker, ub.access_token, ub.api_key, ub.secret_key
     FROM users u
@@ -941,8 +943,12 @@ function safeJson(value) {
 }
 
 function selectedSymbols(symbol, category) {
-  seedDefaultInstruments();
-  if (symbol) return [getInstrument(symbol.toUpperCase()) || addInstrument({ symbol })];
+  throw new Error('selectedSymbols must be called through async strategy helpers.');
+}
+
+async function selectedSymbolsAsync(symbol, category) {
+  await seedDefaultInstruments();
+  if (symbol) return [await getInstrument(symbol.toUpperCase()) || await addInstrument({ symbol })];
   return listInstruments(category);
 }
 
@@ -958,29 +964,29 @@ function inferInstrumentDefaults(symbol, fallback) {
   };
 }
 
-function getInstrument(symbol) {
+async function getInstrument(symbol) {
   return getDb().prepare('SELECT * FROM instruments WHERE symbol = ?').get(symbol);
 }
 
-function getUserByMobile(mobile) {
+async function getUserByMobile(mobile) {
   return getDb().prepare('SELECT * FROM users WHERE mobile = ?').get(mobile);
 }
 
-function requireUser(mobile) {
-  const user = getUserByMobile(mobile);
+async function requireUser(mobile) {
+  const user = await getUserByMobile(mobile);
   if (!user) throw new Error('User not found.');
   return user;
 }
 
-function getUserBroker(userId, broker) {
+async function getUserBroker(userId, broker) {
   return getDb().prepare('SELECT * FROM user_brokers WHERE user_id = ? AND broker = ?').get(userId, broker);
 }
 
-function getUserBrokerById(userId, brokerId) {
+async function getUserBrokerById(userId, brokerId) {
   return getDb().prepare('SELECT * FROM user_brokers WHERE user_id = ? AND id = ?').get(userId, brokerId);
 }
 
-function getActiveOrNamedUserBroker(userId, broker) {
+async function getActiveOrNamedUserBroker(userId, broker) {
   if (Number(broker)) return getUserBrokerById(userId, Number(broker));
   return getDb().prepare(`
     SELECT * FROM user_brokers
@@ -990,37 +996,39 @@ function getActiveOrNamedUserBroker(userId, broker) {
   `).get(userId, broker);
 }
 
-function ensureUserStrategyConfig(userId) {
-  getDb().prepare(`
+async function ensureUserStrategyConfig(userId) {
+  await getDb().prepare(`
     INSERT INTO user_strategy_configs(user_id)
     VALUES (?)
     ON CONFLICT(user_id) DO NOTHING
   `).run(userId);
 }
 
-function ensureDefaultSubscriptions(userId) {
-  const strategies = getDb().prepare('SELECT code FROM strategy_catalog WHERE enabled = 1').all();
+async function ensureDefaultSubscriptions(userId) {
+  const strategies = await getDb().prepare('SELECT code FROM strategy_catalog WHERE enabled = 1').all();
   const stmt = getDb().prepare(`
     INSERT INTO user_strategy_subscriptions(user_id, strategy_code, enabled)
     VALUES (?, ?, 0)
     ON CONFLICT(user_id, strategy_code) DO NOTHING
   `);
-  strategies.forEach((strategy) => stmt.run(userId, strategy.code));
+  for (const strategy of strategies) {
+    await stmt.run(userId, strategy.code);
+  }
 }
 
-function saveBrokerTokens(accountId, authCode, accessToken, refreshToken) {
-  getDb().prepare(`
+async function saveBrokerTokens(accountId, authCode, accessToken, refreshToken) {
+  await getDb().prepare(`
     UPDATE user_brokers
     SET auth_code = ?, access_token = ?, refresh_token = ?, token_expires_at = ?, connected_at = ?, is_connected = 1, is_active = 1, updated_at = ?
     WHERE id = ?
   `).run(authCode, accessToken, refreshToken || null, moment().add(20, 'hours').toISOString(), nowIso(), nowIso(), accountId);
-  const row = getDb().prepare('SELECT user_id FROM user_brokers WHERE id = ?').get(accountId);
-  if (row) getDb().prepare('UPDATE user_brokers SET is_active = 0 WHERE user_id = ? AND id != ?').run(row.user_id, accountId);
+  const row = await getDb().prepare('SELECT user_id FROM user_brokers WHERE id = ?').get(accountId);
+  if (row) await getDb().prepare('UPDATE user_brokers SET is_active = 0 WHERE user_id = ? AND id != ?').run(row.user_id, accountId);
 }
 
-function syncAdminBrokerSettings(settings = {}) {
+async function syncAdminBrokerSettings(settings = {}) {
   if (!settings.data_source_api_key || !settings.data_source_secret_key) return;
-  getDb().prepare(`
+  await getDb().prepare(`
     INSERT INTO admin_brokers(broker, api_key, secret_key, redirect_url, updated_at)
     VALUES ('fyers', ?, ?, ?, ?)
     ON CONFLICT(broker) DO UPDATE SET
@@ -1036,8 +1044,8 @@ function syncAdminBrokerSettings(settings = {}) {
   );
 }
 
-function upsertAdminBrokerTokens({ apiKey, secretKey, redirectUrl, authCode, accessToken, refreshToken }) {
-  getDb().prepare(`
+async function upsertAdminBrokerTokens({ apiKey, secretKey, redirectUrl, authCode, accessToken, refreshToken }) {
+  await getDb().prepare(`
     INSERT INTO admin_brokers(
       broker, api_key, secret_key, redirect_url, auth_code, access_token,
       refresh_token, token_expires_at, connected_at, is_connected, updated_at
@@ -1082,12 +1090,13 @@ function adminCallbackUrl(configuredUrl, publicApiBase) {
   return url.toString();
 }
 
-function seedDefaultInstruments() {
-  const count = getDb().prepare('SELECT COUNT(*) as count FROM instruments').get().count;
+async function seedDefaultInstruments() {
+  const row = await getDb().prepare('SELECT COUNT(*) as count FROM instruments').get();
+  const count = row?.count || 0;
   if (count > 0) return;
-  DEFAULT_STOCKS_NAMES.forEach((symbol) => addInstrument({ symbol, category: 'stock' }));
-  ['NIFTY50', 'NIFTYBANK'].forEach((symbol) => addInstrument({ symbol, category: 'index', instrumentType: '-INDEX' }));
-  ['CRUDEOIL', 'GOLD'].forEach((symbol) => addInstrument({ symbol, category: 'commodity', segment: 'MCX', instrumentType: 'FUT' }));
+  for (const symbol of DEFAULT_STOCKS_NAMES) await addInstrument({ symbol, category: 'stock' });
+  for (const symbol of ['NIFTY50', 'NIFTYBANK']) await addInstrument({ symbol, category: 'index', instrumentType: '-INDEX' });
+  for (const symbol of ['CRUDEOIL', 'GOLD']) await addInstrument({ symbol, category: 'commodity', segment: 'MCX', instrumentType: 'FUT' });
 }
 
 function assertBrokerMutationAllowed() {
@@ -1124,28 +1133,28 @@ function toDbBool(value) {
   return value === true || value === 1 || value === '1' || value === 'true' ? 1 : 0;
 }
 
-function markInstrumentSync(symbol, status, progress) {
-  getDb().prepare(`
+async function markInstrumentSync(symbol, status, progress) {
+  await getDb().prepare(`
     UPDATE instruments
     SET sync_status = ?, sync_progress = ?, last_sync_at = CASE WHEN ? = 'idle' THEN ? ELSE last_sync_at END
     WHERE symbol = ?
   `).run(status, progress, status, nowIso(), symbol);
 }
 
-function recordLogin(userId, mobile, role, status, message) {
-  getDb().prepare(`
+async function recordLogin(userId, mobile, role, status, message) {
+  await getDb().prepare(`
     INSERT INTO login_history(user_id, mobile, role, status, message)
     VALUES (?, ?, ?, ?, ?)
   `).run(userId, mobile, role, status, message);
 }
 
-function lastLoginAt(mobile) {
-  return getDb().prepare(`
+async function lastLoginAt(mobile) {
+  return (await getDb().prepare(`
     SELECT created_at FROM login_history
     WHERE mobile = ?
     ORDER BY id DESC
     LIMIT 1 OFFSET 1
-  `).get(mobile)?.created_at || null;
+  `).get(mobile))?.created_at || null;
 }
 
 function waitRateLimit(ms = 350) {

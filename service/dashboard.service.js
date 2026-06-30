@@ -1,23 +1,23 @@
 import { getDb } from '../db/database.js';
 import { listLogs } from './log.service.js';
 
-export function getUserDetails(mobile) {
-  const user = getDb().prepare('SELECT * FROM users WHERE mobile = ?').get(mobile);
+export async function getUserDetails(mobile) {
+  const user = await getDb().prepare('SELECT * FROM users WHERE mobile = ?').get(mobile);
   if (!user) throw new Error('User not found.');
-  const brokers = getDb().prepare(`
+  const brokers = await getDb().prepare(`
     SELECT id, broker, label, api_key, redirect_url, token_expires_at, is_active, is_connected, connected_at, updated_at
     FROM user_brokers
     WHERE user_id = ?
     ORDER BY is_active DESC, updated_at DESC
   `).all(user.id);
-  const instance = getDb().prepare('SELECT * FROM algo_instances WHERE user_id = ?').get(user.id) || { status: 'stopped' };
-  const config = getDb().prepare('SELECT * FROM user_strategy_configs WHERE user_id = ?').get(user.id);
-  const watchlist = getDb().prepare('SELECT symbol, watchlist_name FROM user_watchlists WHERE user_id = ? ORDER BY symbol').all(user.id);
-  const openOrders = getDb().prepare('SELECT * FROM orders WHERE user_id = ? AND status IN (\'open\', \'dry_run_open\', \'placing\')').all(user.id);
+  const instance = await getDb().prepare('SELECT * FROM algo_instances WHERE user_id = ?').get(user.id) || { status: 'stopped' };
+  const config = await getDb().prepare('SELECT * FROM user_strategy_configs WHERE user_id = ?').get(user.id);
+  const watchlist = await getDb().prepare('SELECT symbol, watchlist_name FROM user_watchlists WHERE user_id = ? ORDER BY symbol').all(user.id);
+  const openOrders = await getDb().prepare('SELECT * FROM orders WHERE user_id = ? AND status IN (\'open\', \'dry_run_open\', \'placing\')').all(user.id);
   return { user, brokers, instance, config, watchlist, openOrders };
 }
 
-export function listBrokerStates() {
+export async function listBrokerStates() {
   return getDb().prepare(`
     SELECT u.mobile, ub.broker, ub.label, ub.is_active, ub.is_connected, ub.connected_at, ub.updated_at
     FROM user_brokers ub
@@ -57,7 +57,7 @@ export function listUsersOverview() {
   `).all();
 }
 
-export function listInstances() {
+export async function listInstances() {
   return getDb().prepare(`
     SELECT u.mobile, ai.status, ai.started_at, ai.stopped_at, ai.updated_at
     FROM users u
@@ -66,7 +66,7 @@ export function listInstances() {
   `).all();
 }
 
-export function listOpenOrders() {
+export async function listOpenOrders() {
   return getDb().prepare(`
     SELECT o.*, u.mobile
     FROM orders o
@@ -76,8 +76,8 @@ export function listOpenOrders() {
   `).all();
 }
 
-export function strategyPerformance() {
-  const rows = getDb().prepare(`
+export async function strategyPerformance() {
+  const rows = await getDb().prepare(`
     SELECT strategy, symbol, stats_json, created_at
     FROM backtests
     ORDER BY id DESC
@@ -110,13 +110,14 @@ export function strategyPerformance() {
   }));
 }
 
-export function backtestSummaries() {
-  return getDb().prepare(`
+export async function backtestSummaries() {
+  const rows = await getDb().prepare(`
     SELECT id, strategy, symbol, range_from, range_to, stats_json, created_at
     FROM backtests
     ORDER BY id DESC
     LIMIT 100
-  `).all().map((row) => ({ ...row, stats: JSON.parse(row.stats_json), stats_json: undefined }));
+  `).all();
+  return rows.map((row) => ({ ...row, stats: JSON.parse(row.stats_json), stats_json: undefined }));
 }
 
 export { listLogs };
