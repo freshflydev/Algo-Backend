@@ -1,19 +1,22 @@
-export const APP_ID = "O78J2WRRS3-100";
-export const SECRET_KEY = "C1YGLGDHS3";
-export const REDIRECT_URL = "https://foodcrisis.in/"
+export const APP_ID = process.env.FYERS_APP_ID || "";
+export const SECRET_KEY = process.env.FYERS_SECRET_KEY || "";
+export const REDIRECT_URL = process.env.FYERS_REDIRECT_URL || "http://127.0.0.1:8080/api/callback/fyers";
 
-export const MCX_CRUDE_FUTURE = "NOV"
-export const MCX_GOLD_FUTURE = "DEC"
+export const MCX_CRUDE_FUTURE = process.env.MCX_CRUDE_FUTURE || "NOV";
+export const MCX_GOLD_FUTURE = process.env.MCX_GOLD_FUTURE || "DEC";
 
-export const BOT_TOKEN = "6183544741:AAFSeQVDdKzIlrJCdTplNpMINO8TRvocJPk"
+export const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 
-export const DEFAULT_STOCKS_NAMES = ["SRF",'DIXON',"ATUL","BAJFINANCE"]; // List of stock names
-export const TIMEFRAME = 15;
+export const DEFAULT_STOCKS_NAMES = (process.env.DEFAULT_STOCKS_NAMES || "SRF,DIXON,ATUL,BAJFINANCE")
+  .split(",")
+  .map((symbol) => symbol.trim())
+  .filter(Boolean);
+export const TIMEFRAME = Number(process.env.TIMEFRAME || 15);
 
-export const ENV  = "LOCAL";
+export const ENV = process.env.NODE_ENV || "LOCAL";
 
-export const ACCESS_CODE = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJhcGkuZnllcnMuaW4iLCJpYXQiOjE3MzAwMTc4MzUsImV4cCI6MTczMDA3NTQzNSwibmJmIjoxNzMwMDE3ODM1LCJhdWQiOlsieDowIiwieDoxIiwieDoyIiwiZDoxIiwiZDoyIiwieDoxIiwieDowIl0sInN1YiI6ImFjY2Vzc190b2tlbiIsImF0X2hhc2giOiJnQUFBQUFCbkhmb3JCdmZHUWZzUGlxZHBQaFZWTjN6MVV1eG5Rc0ZPYUdnSGl6QmJRSDJmZHQxQ01IcnlQei1iWDBWOWJqcjc4dng3TnM3VUpydkh3Qng5YmtURmptbVlFSGxXVjN6U0YtTThTR01mX0owanFOMD0iLCJkaXNwbGF5X25hbWUiOiJWQUlCSEFWIEJIQVVTQUhFQiBLVVJLVVRFIiwib21zIjoiSzEiLCJoc21fa2V5IjoiNDNhNGEyODM1MjdjYzk4NDJkYTg3OTRlNTIyMTBjNTVhZTI3ZTU3YzY1NzJiY2Y2NGEyOGRhODgiLCJmeV9pZCI6IlhWMjA2MTAiLCJhcHBUeXBlIjoxMDAsInBvYV9mbGFnIjoiTiJ9.DPZKyyGzNAV3e2gqgn9V0dmEEGH3eVjviIsEK3NemT0"
-export const AUTH_CODE = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJhcGkubG9naW4uZnllcnMuaW4iLCJpYXQiOjE3MzAwMTc4MzQsImV4cCI6MTczMDA0NzgzNCwibmJmIjoxNzMwMDE3MjM0LCJhdWQiOiJbXCJ4OjBcIiwgXCJ4OjFcIiwgXCJ4OjJcIiwgXCJkOjFcIiwgXCJkOjJcIiwgXCJ4OjFcIiwgXCJ4OjBcIl0iLCJzdWIiOiJhdXRoX2NvZGUiLCJkaXNwbGF5X25hbWUiOiJYVjIwNjEwIiwib21zIjoiSzEiLCJoc21fa2V5IjoiNDNhNGEyODM1MjdjYzk4NDJkYTg3OTRlNTIyMTBjNTVhZTI3ZTU3YzY1NzJiY2Y2NGEyOGRhODgiLCJub25jZSI6IiIsImFwcF9pZCI6Ik83OEoyV1JSUzMiLCJ1dWlkIjoiNjc3ODZkYTU5ZWNlNDAwY2E4NjViMDBlZWNmYzM0MTQiLCJpcEFkZHIiOiIwLjAuMC4wIiwic2NvcGUiOiIifQ.CbAnbl1WiHudPnkdsKeWHqb6p41VuioNFSoY2jZ76Kk"
+export const ACCESS_CODE = process.env.FYERS_ACCESS_CODE || "";
+export const AUTH_CODE = process.env.FYERS_AUTH_CODE || "";
 
-export const LOCAL = true;
-export const LIVEFEED = false
+export const LOCAL = process.env.LOCAL_MODE !== "false";
+export const LIVEFEED = process.env.LIVEFEED === "true";

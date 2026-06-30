@@ -581,27 +581,93 @@ export async function backtestIntradayHaDoji({ symbol, category, rangeFrom, rang
 
 export async function backtestStrategyMatrix({ symbol, category = 'stock', rangeFrom, rangeTo, slippagePercent, costPercent, sameCandlePolicy }) {
   const strategies = listStrategiesAdmin().filter((strategy) => strategy.enabled);
-  const matrix = [];
-  for (const strategy of strategies) {
-    const targetLevels = strategy.settings?.targetLevels?.length ? strategy.settings.targetLevels : [1];
-    const emaVariants = strategy.settings?.emaFilter === 'both' ? [false, true] : [Boolean(strategy.settings?.emaFilter)];
-    for (const useEma of emaVariants) {
-      const levels = strategy.code.includes('ha_doji') ? [2] : targetLevels;
-      for (const targetLevel of levels) {
-        const options = { symbol, category, rangeFrom, rangeTo, targetLevel, useEma, slippagePercent, costPercent, sameCandlePolicy };
-        const rows = await runBacktestByStrategy(strategy.code, options);
-        rows.forEach((row) => matrix.push({
-          variant: `${strategy.code}${useEma ? '_ema' : '_no_ema'}_t${targetLevel}`,
-          strategy: strategy.code,
-          useEma,
-          targetLevel,
-          symbol: row.symbol,
-          ...row.stats,
-        }));
+  const instruments = selectedSymbols(symbol, category);
+  const maxCandleRangePercent = Number(getSettings().spike_candle_percent || 1.2);
+  const byInstrument = [];
+  const summary = [];
+
+  for (const instrument of instruments) {
+    const needsIntraday = strategies.some((strategy) => strategy.mode === 'intraday');
+    const needsDaily = strategies.some((strategy) => strategy.mode === 'swing');
+    const intradayCandles = needsIntraday
+      ? await ensureBacktestCandles(instrument, '15', rangeFrom, rangeTo)
+      : [];
+    const dailyCandles = needsDaily
+      ? await ensureBacktestCandles(instrument, 'D', moment(rangeFrom).subtract(35, 'days').format('YYYY-MM-DD'), rangeTo)
+      : [];
+    const strategyGroups = [];
+
+    for (const strategy of strategies) {
+      const variants = [];
+      const targetLevels = strategy.code.includes('ha_doji')
+        ? [2]
+        : [1, 2, 3, 4, 5];
+      const emaVariants = strategy.settings?.emaFilter === 'both'
+        ? [false, true]
+        : [Boolean(strategy.settings?.emaFilter)];
+
+      for (const useEma of emaVariants) {
+        for (const targetLevel of targetLevels) {
+          const candles = strategy.mode === 'intraday' ? intradayCandles : dailyCandles;
+          const result = runBacktestVariant(strategy.code, candles, {
+            targetLevel,
+            useEma,
+            slippagePercent,
+            costPercent,
+            sameCandlePolicy,
+            maxCandleRangePercent,
+          });
+          const variant = {
+            variant: `${strategy.code}${useEma ? '_ema' : '_no_ema'}_t${targetLevel}`,
+            strategy: strategy.code,
+            strategyName: strategy.name,
+            symbol: instrument.symbol,
+            useEma,
+            targetLevel,
+            stats: result.stats,
+            trades: result.trades,
+            dayBlocks: buildTradeDayBlocks(result.trades),
+          };
+          storeBacktest(strategy.code, instrument.symbol, rangeFrom, rangeTo, result);
+          variants.push(variant);
+          summary.push({
+            variant: variant.variant,
+            strategy: strategy.code,
+            strategyName: strategy.name,
+            symbol: instrument.symbol,
+            useEma,
+            targetLevel,
+            ...result.stats,
+          });
+        }
       }
+
+      strategyGroups.push({
+        code: strategy.code,
+        name: strategy.name,
+        mode: strategy.mode,
+        bestVariant: pickBestVariant(variants),
+        targetStats: buildTargetStats(variants),
+        variants,
+      });
     }
+
+    byInstrument.push({
+      symbol: instrument.symbol,
+      category: instrument.category,
+      candleCounts: {
+        intraday: intradayCandles.length,
+        daily: dailyCandles.length,
+      },
+      bestVariant: pickBestVariant(strategyGroups.map((group) => group.bestVariant).filter(Boolean)),
+      strategies: strategyGroups,
+    });
   }
-  return matrix.sort((a, b) => Number(b.successRatio || 0) - Number(a.successRatio || 0));
+
+  return {
+    summary: summary.sort((a, b) => Number(b.totalPnl || 0) - Number(a.totalPnl || 0)),
+    instruments: byInstrument.sort((a, b) => Number(b.bestVariant?.stats?.totalPnl || 0) - Number(a.bestVariant?.stats?.totalPnl || 0)),
+  };
 }
 
 export function listTrades(filters = {}) {
@@ -704,6 +770,90 @@ async function runBacktestByStrategy(strategyCode, options) {
   if (strategyCode === 'intraday_ha_doji_gann_15m') return backtestIntradayHaDoji(options);
   if (strategyCode === 'swing_ha_doji_gann') return backtestSwingHaDoji(options);
   return backtestSwing(options);
+}
+
+async function ensureBacktestCandles(instrument, resolution, rangeFrom, rangeTo) {
+  let candles = getStoredCandles(instrument.symbol, resolution, rangeFrom, rangeTo);
+  if (candles.length === 0) {
+    await fetchAndStoreCandles({ symbol: instrument.symbol, resolution, rangeFrom, rangeTo });
+    candles = getStoredCandles(instrument.symbol, resolution, rangeFrom, rangeTo);
+  }
+  return candles;
+}
+
+function runBacktestVariant(strategyCode, candles, options) {
+  if (strategyCode === 'intraday_gann_15m') return runIntradayGannStrategy(candles, options);
+  if (strategyCode === 'intraday_ha_doji_gann_15m') return runIntradayHaDojiGannStrategy(candles, options);
+  if (strategyCode === 'swing_ha_doji_gann') return runSwingHaDojiGannStrategy(candles, options);
+  return runSwingGannStrategy(candles, options);
+}
+
+function pickBestVariant(variants) {
+  return variants.reduce((best, item) => {
+    if (!best) return item;
+    const pnlDiff = Number(item.stats?.totalPnl || item.totalPnl || 0) - Number(best.stats?.totalPnl || best.totalPnl || 0);
+    if (pnlDiff !== 0) return pnlDiff > 0 ? item : best;
+    return Number(item.stats?.successRatio || item.successRatio || 0) > Number(best.stats?.successRatio || best.successRatio || 0) ? item : best;
+  }, null);
+}
+
+function buildTargetStats(variants) {
+  const rows = new Map();
+  for (const variant of variants) {
+    const key = `T${variant.targetLevel}`;
+    const current = rows.get(key) || {
+      target: key,
+      targetLevel: variant.targetLevel,
+      runs: 0,
+      trades: 0,
+      targetHits: 0,
+      slHits: 0,
+      pnl: 0,
+      bestPnl: Number.NEGATIVE_INFINITY,
+    };
+    current.runs += 1;
+    current.trades += Number(variant.stats.totalTrades || 0);
+    current.targetHits += Number(variant.stats.targetHits || 0);
+    current.slHits += Number(variant.stats.slHits || 0);
+    current.pnl = Number((current.pnl + Number(variant.stats.totalPnl || 0)).toFixed(2));
+    current.bestPnl = Math.max(current.bestPnl, Number(variant.stats.totalPnl || 0));
+    rows.set(key, current);
+  }
+  return [...rows.values()].map((row) => ({
+    ...row,
+    bestPnl: Number.isFinite(row.bestPnl) ? row.bestPnl : 0,
+    hitRate: row.trades ? Number((row.targetHits / row.trades * 100).toFixed(2)) : 0,
+  })).sort((a, b) => a.targetLevel - b.targetLevel);
+}
+
+function buildTradeDayBlocks(trades) {
+  const byDay = new Map();
+  for (const trade of trades || []) {
+    const time = trade.exitTime || trade.entryTime;
+    const day = typeof time === 'number'
+      ? moment.unix(time).format('YYYY-MM-DD')
+      : String(time || 'unknown').slice(0, 10);
+    const block = byDay.get(day) || {
+      day,
+      trades: 0,
+      pnl: 0,
+      targetHits: 0,
+      slHits: 0,
+      wins: 0,
+      losses: 0,
+      reasons: [],
+    };
+    const pnl = Number(trade.pnl || 0);
+    block.trades += 1;
+    block.pnl = Number((block.pnl + pnl).toFixed(2));
+    block.wins += pnl > 0 ? 1 : 0;
+    block.losses += pnl <= 0 ? 1 : 0;
+    if (String(trade.exitReason || '').includes('TARGET')) block.targetHits += 1;
+    if (String(trade.exitReason || '').includes('SL')) block.slHits += 1;
+    block.reasons.push(trade.exitReason || 'OPEN');
+    byDay.set(day, block);
+  }
+  return [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day));
 }
 
 function parseStrategyRow(row) {
