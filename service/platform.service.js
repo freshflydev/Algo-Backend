@@ -1087,6 +1087,7 @@ function adminCallbackUrl(configuredUrl, publicApiBase) {
   const base = configuredUrl || `${publicApiBase || process.env.PUBLIC_API_BASE || 'http://localhost:8080'}/api/callback/fyers`;
   const url = new URL(base);
   url.searchParams.set('admin', '1');
+  url.searchParams.set('state', 'admin');
   return url.toString();
 }
 

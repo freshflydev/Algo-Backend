@@ -238,39 +238,51 @@ export async function logsAPI(req, res) {
 }
 
 export async function fyersCallbackAPI(req, res) {
-  const code = req.query.auth_code || req.query.code;
+  const code = callbackValue(req.query.auth_code || req.query.code);
+  const isAdmin = isTruthyCallbackFlag(req.query.admin) || callbackValue(req.query.state).toLowerCase() === 'admin';
   if (!code) {
-    return handleBrokerCallbackPage(res, req.query.admin === '1' ? 'admin' : 'user', () => {
+    return handleBrokerCallbackPage(res, isAdmin ? 'admin' : 'user', () => {
       throw new Error('Broker callback is missing auth code. Please start broker connect again from the app.');
     });
   }
-  if (req.query.admin === '1') {
+  if (isAdmin) {
     return handleBrokerCallbackPage(res, 'admin', () => completeAdminBrokerCallback({ code }));
   }
-  const mobile = req.query.mobile || req.query.state;
+  const mobile = callbackValue(req.query.mobile) || callbackValue(req.query.state);
   if (mobile) {
     return handleBrokerCallbackPage(res, 'user', () => completeUserBrokerCallback({
       broker: 'fyers',
       mobile,
       code,
-      brokerId: req.query.brokerId,
+      brokerId: callbackValue(req.query.brokerId),
     }));
   }
   return handleBrokerCallbackPage(res, 'admin', () => brokerAccess(code));
 }
 
 export async function upstoxCallbackAPI(req, res) {
-  if (!req.query.code) {
+  const code = callbackValue(req.query.code);
+  if (!code) {
     return handleBrokerCallbackPage(res, 'user', () => {
       throw new Error('Broker callback is missing auth code. Please start broker connect again from the app.');
     });
   }
   return handleBrokerCallbackPage(res, 'user', () => completeUserBrokerCallback({
     broker: 'upstox',
-    mobile: req.query.mobile || req.query.state,
-    code: req.query.code,
-    brokerId: req.query.brokerId,
+    mobile: callbackValue(req.query.mobile) || callbackValue(req.query.state),
+    code,
+    brokerId: callbackValue(req.query.brokerId),
   }));
+}
+
+export function callbackValue(value) {
+  if (Array.isArray(value)) return callbackValue(value[0]);
+  if (value === undefined || value === null) return '';
+  return String(value).split('?')[0].trim();
+}
+
+export function isTruthyCallbackFlag(value) {
+  return ['1', 'true', 'yes'].includes(callbackValue(value).toLowerCase());
 }
 
 async function handleBrokerCallbackPage(res, role, fn) {
