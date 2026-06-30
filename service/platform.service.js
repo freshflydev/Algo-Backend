@@ -62,7 +62,12 @@ export async function listInstruments(category) {
       d.atr_trend AS latest_ha_swing_trend,
       d.consecutive_days AS continuation_days,
       d.stop_loss AS latest_stop_loss,
-      d.trade_date AS latest_trend_date
+      d.trade_date AS latest_trend_date,
+      COALESCE(c.candle_count, 0) AS candle_count,
+      COALESCE(c.daily_candle_count, 0) AS daily_candle_count,
+      COALESCE(c.intraday_candle_count, 0) AS intraday_candle_count,
+      c.latest_candle_time,
+      c.latest_candle_date
     FROM instruments i
     LEFT JOIN daily_trend_analysis d ON d.id = (
       SELECT id FROM daily_trend_analysis
@@ -70,6 +75,17 @@ export async function listInstruments(category) {
       ORDER BY trade_date DESC
       LIMIT 1
     )
+    LEFT JOIN (
+      SELECT
+        symbol,
+        COUNT(*) AS candle_count,
+        SUM(CASE WHEN resolution = 'D' THEN 1 ELSE 0 END) AS daily_candle_count,
+        SUM(CASE WHEN resolution != 'D' THEN 1 ELSE 0 END) AS intraday_candle_count,
+        MAX(candle_time) AS latest_candle_time,
+        MAX(trade_date) AS latest_candle_date
+      FROM candles
+      GROUP BY symbol
+    ) c ON c.symbol = i.symbol
     WHERE i.enabled = 1
   `;
   if (category) {
@@ -532,7 +548,7 @@ export async function fetchAndStoreCandles({ symbol, resolution = '15', rangeFro
     const history = await getHistoryQuotes(query);
     const data = transformCandel(history);
     const candles = arraysToCandles(data);
-    storeCandles(instrument.symbol, resolution, candles);
+    await storeCandles(instrument.symbol, resolution, candles);
     await markInstrumentSync(instrument.symbol, 'idle', 100);
     stored.push({ symbol: instrument.symbol, count: candles.length });
   }
@@ -544,10 +560,10 @@ export async function calculateAndStoreDailyGannLevels({ symbol, category, trade
   const date = tradeDate || moment().format('YYYY-MM-DD');
   const results = [];
   for (const instrument of instruments) {
-    let candles = getStoredCandles(instrument.symbol, '15', date, date);
+    let candles = await getStoredCandles(instrument.symbol, '15', date, date);
     if (candles.length === 0) {
       await fetchAndStoreCandles({ symbol: instrument.symbol, resolution: '15', rangeFrom: date, rangeTo: date });
-      candles = getStoredCandles(instrument.symbol, '15', date, date);
+      candles = await getStoredCandles(instrument.symbol, '15', date, date);
     }
     if (candles.length === 0) continue;
     const sourcePrice = candles[0].open;
@@ -563,10 +579,10 @@ export async function backtestIntraday({ symbol, category, rangeFrom, rangeTo, t
   const results = [];
   const maxCandleRangePercent = Number((await getSettings()).spike_candle_percent || 1.2);
   for (const instrument of instruments) {
-    let candles = getStoredCandles(instrument.symbol, '15', rangeFrom, rangeTo);
+    let candles = await getStoredCandles(instrument.symbol, '15', rangeFrom, rangeTo);
     if (candles.length === 0) {
       await fetchAndStoreCandles({ symbol: instrument.symbol, resolution: '15', rangeFrom, rangeTo });
-      candles = getStoredCandles(instrument.symbol, '15', rangeFrom, rangeTo);
+      candles = await getStoredCandles(instrument.symbol, '15', rangeFrom, rangeTo);
     }
     const result = runIntradayGannStrategy(candles, { targetLevel, useEma, slippagePercent, costPercent, sameCandlePolicy, maxCandleRangePercent });
     storeBacktest('intraday_gann_15m', instrument.symbol, rangeFrom, rangeTo, result);
@@ -581,10 +597,10 @@ export async function backtestSwing({ symbol, category, rangeFrom, rangeTo, targ
   const maxCandleRangePercent = Number((await getSettings()).spike_candle_percent || 1.2);
   for (const instrument of instruments) {
     const fromWithWarmup = moment(rangeFrom).subtract(35, 'days').format('YYYY-MM-DD');
-    let candles = getStoredCandles(instrument.symbol, 'D', fromWithWarmup, rangeTo);
+    let candles = await getStoredCandles(instrument.symbol, 'D', fromWithWarmup, rangeTo);
     if (candles.length === 0) {
       await fetchAndStoreCandles({ symbol: instrument.symbol, resolution: 'D', rangeFrom: fromWithWarmup, rangeTo });
-      candles = getStoredCandles(instrument.symbol, 'D', fromWithWarmup, rangeTo);
+      candles = await getStoredCandles(instrument.symbol, 'D', fromWithWarmup, rangeTo);
     }
     const result = runSwingGannStrategy(candles, { targetLevel, useEma, slippagePercent, costPercent, sameCandlePolicy, maxCandleRangePercent });
     storeBacktest('swing_gann_daily', instrument.symbol, rangeFrom, rangeTo, result);
@@ -599,10 +615,10 @@ export async function backtestSwingHaDoji({ symbol, category, rangeFrom, rangeTo
   const maxCandleRangePercent = Number((await getSettings()).spike_candle_percent || 1.2);
   for (const instrument of instruments) {
     const fromWithWarmup = moment(rangeFrom).subtract(35, 'days').format('YYYY-MM-DD');
-    let candles = getStoredCandles(instrument.symbol, 'D', fromWithWarmup, rangeTo);
+    let candles = await getStoredCandles(instrument.symbol, 'D', fromWithWarmup, rangeTo);
     if (candles.length === 0) {
       await fetchAndStoreCandles({ symbol: instrument.symbol, resolution: 'D', rangeFrom: fromWithWarmup, rangeTo });
-      candles = getStoredCandles(instrument.symbol, 'D', fromWithWarmup, rangeTo);
+      candles = await getStoredCandles(instrument.symbol, 'D', fromWithWarmup, rangeTo);
     }
     const result = runSwingHaDojiGannStrategy(candles, { useEma, slippagePercent, costPercent, sameCandlePolicy, maxCandleRangePercent });
     storeBacktest('swing_ha_doji_gann', instrument.symbol, rangeFrom, rangeTo, result);
@@ -616,10 +632,10 @@ export async function backtestIntradayHaDoji({ symbol, category, rangeFrom, rang
   const results = [];
   const maxCandleRangePercent = Number((await getSettings()).spike_candle_percent || 1.2);
   for (const instrument of instruments) {
-    let candles = getStoredCandles(instrument.symbol, '15', rangeFrom, rangeTo);
+    let candles = await getStoredCandles(instrument.symbol, '15', rangeFrom, rangeTo);
     if (candles.length === 0) {
       await fetchAndStoreCandles({ symbol: instrument.symbol, resolution: '15', rangeFrom, rangeTo });
-      candles = getStoredCandles(instrument.symbol, '15', rangeFrom, rangeTo);
+      candles = await getStoredCandles(instrument.symbol, '15', rangeFrom, rangeTo);
     }
     const result = runIntradayHaDojiGannStrategy(candles, { useEma, slippagePercent, costPercent, sameCandlePolicy, maxCandleRangePercent });
     storeBacktest('intraday_ha_doji_gann_15m', instrument.symbol, rangeFrom, rangeTo, result);
@@ -768,20 +784,20 @@ export async function getActiveUsers() {
   `).all();
 }
 
-export function storeCandles(symbol, resolution, candles) {
+export async function storeCandles(symbol, resolution, candles) {
   const stmt = getDb().prepare(`
     INSERT INTO candles(symbol, resolution, candle_time, trade_date, open, high, low, close, volume)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(symbol, resolution, candle_time) DO UPDATE SET
       open = excluded.open, high = excluded.high, low = excluded.low, close = excluded.close, volume = excluded.volume
   `);
-  candles.forEach((candle) => {
+  for (const candle of candles) {
     const tradeDate = moment.unix(candle.time).tz('Asia/Kolkata').format('YYYY-MM-DD');
-    stmt.run(symbol, resolution, candle.time, tradeDate, candle.open, candle.high, candle.low, candle.close, candle.volume || 0);
-  });
+    await stmt.run(symbol, resolution, candle.time, tradeDate, candle.open, candle.high, candle.low, candle.close, candle.volume || 0);
+  }
 }
 
-export function getStoredCandles(symbol, resolution, rangeFrom, rangeTo) {
+export async function getStoredCandles(symbol, resolution, rangeFrom, rangeTo) {
   return getDb().prepare(`
     SELECT candle_time as time, open, high, low, close, volume
     FROM candles
@@ -839,10 +855,10 @@ async function runBacktestByStrategy(strategyCode, options) {
 }
 
 async function ensureBacktestCandles(instrument, resolution, rangeFrom, rangeTo) {
-  let candles = getStoredCandles(instrument.symbol, resolution, rangeFrom, rangeTo);
+  let candles = await getStoredCandles(instrument.symbol, resolution, rangeFrom, rangeTo);
   if (candles.length === 0) {
     await fetchAndStoreCandles({ symbol: instrument.symbol, resolution, rangeFrom, rangeTo });
-    candles = getStoredCandles(instrument.symbol, resolution, rangeFrom, rangeTo);
+    candles = await getStoredCandles(instrument.symbol, resolution, rangeFrom, rangeTo);
   }
   return candles;
 }

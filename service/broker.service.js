@@ -7,6 +7,7 @@ import { enableScheduler } from "../scheduler/alertScheduler.js";
 import fs from 'fs';
 import path from 'path';
 import { waitForFyersSlot } from "./rateLimiter.service.js";
+import { getDb } from '../db/database.js';
 const FILE_PATH = path.resolve('credentials.json');
 
 
@@ -119,10 +120,17 @@ return cache.get(key);
 
 // QUOTES API
 export async function historyQuotes(inp){
-    setToken();
     try {
+      const dataSource = await getAdminFyersDataSource();
+      const historyClient = dataSource || fyers;
+      if (dataSource) {
+        historyClient.setAppId(dataSource.api_key);
+        historyClient.setAccessToken(dataSource.access_token);
+      } else {
+        setToken();
+      }
       await waitForFyersSlot('history');
-      const response = await fyers.getHistory(inp);
+      const response = await historyClient.getHistory(inp);
       if(response.s=="error")
           throw new Error(response.message)
       return response;
@@ -130,6 +138,21 @@ export async function historyQuotes(inp){
       console.error(err);
       throw err; // Re-throw the error if needed
     }
+}
+
+async function getAdminFyersDataSource() {
+  const account = await getDb().prepare(`
+    SELECT api_key, access_token
+    FROM admin_brokers
+    WHERE broker = 'fyers' AND is_connected = 1 AND access_token IS NOT NULL AND access_token != ''
+    ORDER BY connected_at DESC, updated_at DESC
+    LIMIT 1
+  `).get();
+  if (!account?.api_key || !account?.access_token) return null;
+  const client = new FyersAPI.fyersModel();
+  client.api_key = account.api_key;
+  client.access_token = account.access_token;
+  return client;
 }
 
 // DATA SOCKET
