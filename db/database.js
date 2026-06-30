@@ -1,17 +1,14 @@
 import 'dotenv/config';
 import Mysql from 'sync-mysql';
-import { DatabaseSync } from 'node:sqlite';
+import { createRequire } from 'module';
 import path from 'path';
 
+const require = createRequire(import.meta.url);
 const DB_PATH = path.resolve('algotrade.sqlite');
 const DB_CLIENT = (process.env.DB_CLIENT || process.env.DB_DRIVER || 'sqlite').toLowerCase();
 const isMysql = DB_CLIENT === 'mysql';
-const db = isMysql ? createMysqlDb() : new DatabaseSync(DB_PATH);
+let db;
 
-if (!isMysql) {
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA foreign_keys = ON');
-}
 
 function createMysqlDb() {
   return new MysqlCompatDb({
@@ -24,15 +21,23 @@ function createMysqlDb() {
   });
 }
 
+function createSqliteDb() {
+  const { DatabaseSync } = require('node:sqlite');
+  return new DatabaseSync(DB_PATH);
+}
+
 class MysqlCompatDb {
   constructor(config) {
     if (!config.user || !config.database) {
-      throw new Error('MySQL mode requires MYSQL_USER and MYSQL_DATABASE.');
+      this.configError = 'MySQL mode requires MYSQL_USER and MYSQL_DATABASE.';
+      this.connection = null;
+      return;
     }
     this.connection = new Mysql(config);
   }
 
   exec(sql) {
+    this.assertReady();
     for (const statement of splitSqlStatements(sql)) {
       const next = this.normalizeSql(statement);
       if (!next) continue;
@@ -41,6 +46,7 @@ class MysqlCompatDb {
   }
 
   prepare(sql) {
+    this.assertReady();
     const pragma = parsePragma(sql);
     if (pragma) return this.preparePragma(pragma);
     const normalized = this.normalizeSql(sql);
@@ -66,6 +72,7 @@ class MysqlCompatDb {
   }
 
   queryPragma({ name, table }) {
+    this.assertReady();
     if (name === 'table_info') {
       return this.connection.query(`
         SELECT COLUMN_NAME AS name
@@ -83,6 +90,11 @@ class MysqlCompatDb {
       `, [table]);
     }
     return [];
+  }
+
+  assertReady() {
+    if (this.configError) throw new Error(this.configError);
+    if (!this.connection) throw new Error('MySQL connection is not initialized.');
   }
 
   normalizeSql(sql) {
@@ -176,6 +188,13 @@ function normalizeMysqlExpressions(sql) {
     /ub\.broker\s*\|\|\s*':'\s*\|\|\s*CASE WHEN ub\.is_active = 1 THEN 'active' ELSE 'saved' END/gi,
     "CONCAT(ub.broker, ':', CASE WHEN ub.is_active = 1 THEN 'active' ELSE 'saved' END)",
   );
+}
+
+db = isMysql ? createMysqlDb() : createSqliteDb();
+
+if (!isMysql) {
+  db.exec('PRAGMA journal_mode = WAL');
+  db.exec('PRAGMA foreign_keys = ON');
 }
 
 export function initDatabase() {

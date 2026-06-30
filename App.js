@@ -88,6 +88,9 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json());
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ ok: true, service: 'Algo API', time: new Date().toISOString() });
+});
 
 // Express Server
 const port = Number(process.env.PORT || 8080);
@@ -205,8 +208,17 @@ app.delete('/api/users/:mobile/watchlist/:symbol', removeUserWatchlistAPI);
 app.get('/api/callback/fyers', fyersCallbackAPI);
 app.get('/api/callback/upstox', upstoxCallbackAPI);
 
-initDatabase();
-onStart();
-enableAlgoSchedulers();
-startLiveOrderMonitor();
-loadCandleDataFromFile(); // Load data when app starts
+safeStartup('database init', () => initDatabase());
+safeStartup('broker boot', () => onStart());
+safeStartup('algo schedulers', () => enableAlgoSchedulers());
+safeStartup('live order monitor', () => startLiveOrderMonitor());
+safeStartup('local candle file load', () => loadCandleDataFromFile());
+
+function safeStartup(label, fn) {
+  try {
+    const result = fn();
+    if (result?.catch) result.catch((error) => console.error(`${label} failed:`, error));
+  } catch (error) {
+    console.error(`${label} failed:`, error);
+  }
+}
