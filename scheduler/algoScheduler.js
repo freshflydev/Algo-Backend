@@ -1,7 +1,7 @@
 import moment from 'moment-timezone';
 import schedule from 'node-schedule';
 import { calculateAndStoreDailyGannLevels, getSettings, listInstruments } from '../service/platform.service.js';
-import { forceCloseIntradayOrders, placeStrategyOrder } from '../service/order.service.js';
+import { exitOrder, forceCloseIntradayOrders, placeStrategyOrder } from '../service/order.service.js';
 import { getDb } from '../db/database.js';
 import { calculateEMA, toHeikinAshi } from '../util/Indicators.js';
 import { calculateGannLevels } from '../util/GannLevels.js';
@@ -127,6 +127,8 @@ async function maybeTriggerSwingHaDojiOrders(symbol, settings) {
   const previousHa = ha[index - 1];
   const currentHa = ha[index];
   const levels = calculateGannLevels(currentHa.open);
+  const previousLevels = calculateGannLevels(previousHa.open);
+  await manageOpenSwingHaDojiOrders(symbol, candle, previousLevels.sell);
   const previousWasDoji = isHaDoji(previousHa);
   const breaksDojiHigh = candle.high > previousHa.high && candle.close > previousHa.high;
   const aboveGann = candle.close > levels.buy;
@@ -179,6 +181,30 @@ async function maybeTriggerSwingHaDojiOrders(symbol, settings) {
     placed = true;
   }
   return placed;
+}
+
+async function manageOpenSwingHaDojiOrders(symbol, candle, trailingStopLoss) {
+  const orders = getDb().prepare(`
+    SELECT * FROM orders
+    WHERE symbol = ?
+      AND strategy = 'swing_ha_doji_gann'
+      AND status IN ('open', 'dry_run_open')
+  `).all(symbol);
+  for (const order of orders) {
+    const hitTarget = candle.high >= Number(order.target_price || 0);
+    const hitTrailingSl = candle.low <= trailingStopLoss;
+    if (hitTarget) {
+      await exitOrder(order, Number(order.target_price), `TARGET_${order.target_level || 2}`);
+      continue;
+    }
+    if (hitTrailingSl) {
+      await exitOrder(order, trailingStopLoss, 'PREVIOUS_DAY_GANN_SELL_SL');
+      continue;
+    }
+    getDb().prepare(`
+      UPDATE orders SET stop_loss = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+    `).run(trailingStopLoss, order.id);
+  }
 }
 
 async function maybeTriggerIntradayOrders(symbol, current, previous, level, candles, settings) {
