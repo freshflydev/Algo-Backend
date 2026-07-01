@@ -50,6 +50,7 @@ import {
   stopUserInstanceAPI,
   swingBacktestAPI,
   swingHaDojiBacktestAPI,
+  telegramTestAPI,
   tradesAPI,
   updateStrategyAdminAPI,
   updateUserBrokerAPI,
@@ -169,6 +170,7 @@ app.post('/api/login', loginAPI);
 app.get('/api/login-history', loginHistoryAPI);
 app.get('/api/admin/settings', settingsAPI);
 app.post('/api/admin/settings', settingsAPI);
+app.post('/api/admin/telegram/test', telegramTestAPI);
 app.get('/api/admin/instruments', listInstrumentsAPI);
 app.post('/api/admin/instruments', addInstrumentAPI);
 app.get('/api/admin/instruments/:symbol/trend', instrumentTrendAPI);

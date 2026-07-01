@@ -30,6 +30,24 @@ export async function updateSettings(settings) {
   return getSettings();
 }
 
+export async function testTelegramConnection() {
+  const settings = await getSettings();
+  if (!settings.telegram_bot_token || !settings.telegram_chat_id) {
+    throw new Error('Save Telegram bot token and chat ID before testing.');
+  }
+  const response = await fetch(`https://api.telegram.org/bot${settings.telegram_bot_token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: settings.telegram_chat_id,
+      text: `AlgoBot Telegram test ${nowIso()}`,
+    }),
+  });
+  const data = await response.json();
+  if (!data.ok) throw new Error(data.description || 'Telegram test failed.');
+  return { ok: true, status: 'connected' };
+}
+
 export async function addInstrument({ symbol, category = 'stock', segment = 'NSE', instrumentType = '-EQ' }) {
   const normalized = symbol.toUpperCase();
   const derived = inferInstrumentDefaults(normalized, { category, segment, instrumentType });
@@ -418,28 +436,14 @@ export async function listStrategiesForUser(mobile) {
     SELECT
       sc.*,
       us.enabled AS subscribed,
-      us.target_level,
-      COALESCE(perf.success_ratio, 0) AS success_rate,
-      COALESCE(perf.best_symbol, '') AS best_symbol
+      us.target_level
     FROM strategy_catalog sc
     LEFT JOIN user_strategy_subscriptions us ON us.strategy_code = sc.code AND us.user_id = ?
-    LEFT JOIN (
-      SELECT strategy, ROUND(AVG(success_ratio), 2) AS success_ratio, symbol AS best_symbol
-      FROM (
-        SELECT
-          strategy,
-          symbol,
-          json_extract(stats_json, '$.successRatio') AS success_ratio,
-          ROW_NUMBER() OVER (PARTITION BY strategy ORDER BY json_extract(stats_json, '$.successRatio') DESC) AS rank_no
-        FROM backtests
-      )
-      WHERE rank_no = 1
-      GROUP BY strategy
-    ) perf ON perf.strategy = sc.code
     WHERE sc.enabled = 1
     ORDER BY sc.mode, sc.name
   `).all(user.id);
-  return rows.map(parseStrategyRow);
+  const perf = await strategyBacktestPerformance();
+  return rows.map((row) => ({ ...parseStrategyRow(row), ...(perf.get(row.code) || { success_rate: 0, best_symbol: '' }) }));
 }
 
 export async function listUserStrategyHistory(mobile, strategyCode) {
@@ -488,24 +492,12 @@ export async function updateUserStrategySubscription(mobile, strategyCode, paylo
 
 export async function listStrategiesAdmin() {
   const rows = await getDb().prepare(`
-    SELECT
-      sc.*,
-      COALESCE(perf.runs, 0) AS runs,
-      COALESCE(perf.successRatio, 0) AS success_rate,
-      COALESCE(perf.totalTrades, 0) AS total_trades
+    SELECT sc.*
     FROM strategy_catalog sc
-    LEFT JOIN (
-      SELECT
-        strategy,
-        COUNT(*) AS runs,
-        SUM(json_extract(stats_json, '$.totalTrades')) AS totalTrades,
-        ROUND(AVG(json_extract(stats_json, '$.successRatio')), 2) AS successRatio
-      FROM backtests
-      GROUP BY strategy
-    ) perf ON perf.strategy = sc.code
     ORDER BY sc.mode, sc.name
   `).all();
-  return rows.map(parseStrategyRow);
+  const perf = await strategyBacktestPerformance();
+  return rows.map((row) => ({ ...parseStrategyRow(row), ...(perf.get(row.code) || { runs: 0, success_rate: 0, total_trades: 0 }) }));
 }
 
 export async function updateStrategyAdmin(code, payload) {
@@ -945,6 +937,41 @@ function buildTradeDayBlocks(trades) {
 
 function parseStrategyRow(row) {
   return { ...row, settings: normalizeStrategySettings(row.settings_json) };
+}
+
+async function strategyBacktestPerformance() {
+  const rows = await getDb().prepare(`
+    SELECT strategy, symbol, stats_json
+    FROM backtests
+    ORDER BY id DESC
+    LIMIT 1000
+  `).all();
+  const grouped = new Map();
+  for (const row of rows) {
+    const stats = safeJson(row.stats_json);
+    const current = grouped.get(row.strategy) || {
+      runs: 0,
+      total_trades: 0,
+      successTotal: 0,
+      best_symbol: '',
+      bestSuccess: Number.NEGATIVE_INFINITY,
+    };
+    const success = Number(stats.successRatio || 0);
+    current.runs += 1;
+    current.total_trades += Number(stats.totalTrades || 0);
+    current.successTotal += success;
+    if (success > current.bestSuccess) {
+      current.bestSuccess = success;
+      current.best_symbol = row.symbol;
+    }
+    grouped.set(row.strategy, current);
+  }
+  return new Map([...grouped.entries()].map(([strategy, value]) => [strategy, {
+    runs: value.runs,
+    total_trades: value.total_trades,
+    success_rate: value.runs ? Number((value.successTotal / value.runs).toFixed(2)) : 0,
+    best_symbol: value.best_symbol,
+  }]));
 }
 
 function normalizeStrategySettings(value) {

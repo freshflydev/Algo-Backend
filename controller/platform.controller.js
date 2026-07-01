@@ -31,6 +31,7 @@ import {
   setActiveUserBroker,
   startUserInstance,
   stopUserInstance,
+  testTelegramConnection,
   updateStrategyAdmin,
   updateSettings,
   updateUserStrategySubscription,
@@ -55,6 +56,10 @@ import {
 export async function settingsAPI(req, res) {
   if (req.method === 'POST') return handle(res, () => updateSettings(req.body));
   return handle(res, () => getSettings());
+}
+
+export async function telegramTestAPI(req, res) {
+  return handle(res, () => testTelegramConnection());
 }
 
 export async function loginAPI(req, res) {
