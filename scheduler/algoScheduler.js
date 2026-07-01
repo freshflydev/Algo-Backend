@@ -4,6 +4,7 @@ import { calculateAndStoreDailyGannLevels, getSettings, listInstruments } from '
 import { forceCloseIntradayOrders, placeStrategyOrder } from '../service/order.service.js';
 import { getDb } from '../db/database.js';
 import { calculateEMA, toHeikinAshi } from '../util/Indicators.js';
+import { calculateGannLevels } from '../util/GannLevels.js';
 import { logEvent } from '../service/log.service.js';
 
 moment.tz.setDefault('Asia/Kolkata');
@@ -51,7 +52,7 @@ function configureIntradayJob() {
       if (!now.isBetween(start, end, undefined, '[]')) return;
 
       const date = now.format('YYYY-MM-DD');
-      const instruments = listInstruments();
+      const instruments = await listInstruments();
       let processed = 0;
       for (const instrument of instruments) {
         const level = getDb().prepare('SELECT * FROM gann_levels WHERE symbol = ? AND trade_date = ?').get(instrument.symbol, date);
@@ -94,14 +95,90 @@ function configureSwingJob() {
     try {
       const settings = await getSettings();
       if (!settings.swing_enabled) return;
-      // Swing execution is daily and long-only. Historical/backtest logic is implemented
-      // in strategyEngine; live order trigger is intentionally conservative until the
-      // daily candle is stored by the data fetch scheduler.
-      logEvent('info', 'scheduler-swing', 'Swing scheduler checked daily candle readiness');
+      const instruments = await listInstruments();
+      let processed = 0;
+      let signals = 0;
+      for (const instrument of instruments) {
+        const signal = await maybeTriggerSwingHaDojiOrders(instrument.symbol, settings);
+        processed += 1;
+        if (signal) signals += 1;
+      }
+      logEvent('info', 'scheduler-swing', `Completed swing HA doji scan for ${processed} instruments with ${signals} signals`);
     } catch (error) {
       logEvent('error', 'scheduler-swing', 'Swing scheduler failed', { error: error.message || String(error) });
     }
   });
+}
+
+async function maybeTriggerSwingHaDojiOrders(symbol, settings) {
+  const rows = getDb().prepare(`
+    SELECT * FROM candles
+    WHERE symbol = ? AND resolution IN ('D', '1D')
+    ORDER BY candle_time DESC
+    LIMIT 45
+  `).all(symbol);
+  if (rows.length < 31) return false;
+
+  const candles = rows.reverse().map(dbCandleToStrategyCandle);
+  const ha = toHeikinAshi(candles);
+  const ema = calculateEMA(candles.map((candle) => candle.close), 21);
+  const index = candles.length - 1;
+  const candle = candles[index];
+  const previousHa = ha[index - 1];
+  const currentHa = ha[index];
+  const levels = calculateGannLevels(currentHa.open);
+  const previousWasDoji = isHaDoji(previousHa);
+  const breaksDojiHigh = candle.high > previousHa.high && candle.close > previousHa.high;
+  const aboveGann = candle.close > levels.buy;
+  const emaOk = settings.swing_ema_filter_enabled === false || candle.close > ema[index];
+  if (!previousWasDoji || !breaksDojiHigh || !aboveGann || !emaOk || isSpikeCandle(candle, Number(settings.spike_candle_percent || 1.2))) {
+    return false;
+  }
+
+  const entryPrice = Math.max(candle.close, previousHa.high);
+  const stopLoss = previousHa.low;
+  const risk = entryPrice - stopLoss;
+  if (risk <= 0) return false;
+  const targetPrice = entryPrice + risk * 2;
+
+  const users = getDb().prepare(`
+    SELECT u.*, ub.broker, ub.api_key, ub.secret_key, ub.access_token, ub.refresh_token,
+      COALESCE(usc.swing_scope, 'WATCHLIST') AS swing_scope,
+      us.target_level
+    FROM users u
+    JOIN algo_instances ai ON ai.user_id = u.id AND ai.status = 'running'
+    JOIN user_brokers ub ON ub.user_id = u.id AND ub.is_connected = 1 AND ub.is_active = 1
+    JOIN user_strategy_subscriptions us ON us.user_id = u.id
+      AND us.strategy_code = 'swing_ha_doji_gann'
+      AND us.enabled = 1
+    LEFT JOIN user_strategy_configs usc ON usc.user_id = u.id
+    WHERE u.is_active = 1
+  `).all();
+
+  let placed = false;
+  for (const user of users) {
+    if (!isSwingSymbolInUserScope(user, symbol)) continue;
+    const existing = getDb().prepare(`
+      SELECT id FROM orders
+      WHERE user_id = ? AND symbol = ? AND status IN ('open', 'placing', 'dry_run_open')
+      LIMIT 1
+    `).get(user.id, symbol);
+    if (existing) continue;
+    await placeStrategyOrder({
+      user,
+      brokerAccount: user,
+      strategy: 'swing_ha_doji_gann',
+      symbol,
+      side: 'BUY',
+      entryPrice,
+      stopLoss,
+      targetPrice,
+      targetLevel: 2,
+      candle,
+    });
+    placed = true;
+  }
+  return placed;
 }
 
 async function maybeTriggerIntradayOrders(symbol, current, previous, level, candles, settings) {
@@ -192,6 +269,17 @@ async function maybeTriggerIntradayOrders(symbol, current, previous, level, cand
 
 function isSymbolInUserScope(user, symbol) {
   if ((user.intraday_scope || 'WATCHLIST') === 'AUTOMATED') return true;
+  return Boolean(getDb().prepare(`
+    SELECT id FROM user_watchlists
+    WHERE user_id = ? AND symbol = ?
+    LIMIT 1
+  `).get(user.id, symbol));
+}
+
+function isSwingSymbolInUserScope(user, symbol) {
+  if ((user.swing_scope || 'WATCHLIST') === 'AUTOMATED') return true;
+  const hasWatchlist = getDb().prepare('SELECT id FROM user_watchlists WHERE user_id = ? LIMIT 1').get(user.id);
+  if (!hasWatchlist) return true;
   return Boolean(getDb().prepare(`
     SELECT id FROM user_watchlists
     WHERE user_id = ? AND symbol = ?

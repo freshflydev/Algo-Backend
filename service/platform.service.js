@@ -6,8 +6,12 @@ import { arraysToCandles } from '../util/Indicators.js';
 import { calculateGannLevels } from '../util/GannLevels.js';
 import { runIntradayGannStrategy, runIntradayHaDojiGannStrategy, runSwingGannStrategy, runSwingHaDojiGannStrategy } from './strategyEngine.service.js';
 import { DEFAULT_STOCKS_NAMES } from '../Config.js';
+import { rebuildDailyAnalysis } from './dailyAnalysis.service.js';
+import { logEvent } from './log.service.js';
 
 moment.tz.setDefault('Asia/Kolkata');
+
+const ACTIVE_STRATEGY_CODE = 'swing_ha_doji_gann';
 
 export async function getSettings() {
   const rows = await getDb().prepare('SELECT key, value FROM app_settings ORDER BY key').all();
@@ -357,6 +361,9 @@ export async function completeAdminBrokerCallback({ code }) {
     data_source_access_token: data.access_token,
     data_source_refresh_token: data.refresh_token || '',
   });
+  void syncMissingDailyCandlesAfterDataSourceConnect().catch((error) => {
+    logEvent('error', 'data-sync', 'Data-source post-connect candle sync failed', { error: error.message || String(error) });
+  });
   return { broker: 'fyers', connected: true };
 }
 
@@ -439,21 +446,21 @@ export async function listStrategiesForUser(mobile) {
       us.target_level
     FROM strategy_catalog sc
     LEFT JOIN user_strategy_subscriptions us ON us.strategy_code = sc.code AND us.user_id = ?
-    WHERE sc.enabled = 1
+    WHERE sc.enabled = 1 AND sc.code = ?
     ORDER BY sc.mode, sc.name
-  `).all(user.id);
+  `).all(user.id, ACTIVE_STRATEGY_CODE);
   const perf = await strategyBacktestPerformance();
   return rows.map((row) => ({ ...parseStrategyRow(row), ...(perf.get(row.code) || { success_rate: 0, best_symbol: '' }) }));
 }
 
 export async function listUserStrategyHistory(mobile, strategyCode) {
+  if (strategyCode !== ACTIVE_STRATEGY_CODE) return { watchlist: [], trades: [] };
   const user = await requireUser(mobile);
   const watchlist = (await getDb().prepare(`
     SELECT symbol FROM user_watchlists
     WHERE user_id = ?
     ORDER BY symbol
   `).all(user.id)).map((row) => row.symbol);
-  const watchlistSet = new Set(watchlist);
 
   const trades = await getDb().prepare(`
     SELECT strategy, symbol, side, quantity, entry_price, exit_price, exit_reason, status, order_tag, entered_at, exited_at
@@ -463,20 +470,11 @@ export async function listUserStrategyHistory(mobile, strategyCode) {
     LIMIT 100
   `).all(user.id, strategyCode);
 
-  const backtests = (await getDb().prepare(`
-    SELECT id, strategy, symbol, range_from, range_to, stats_json, created_at
-    FROM backtests
-    WHERE strategy = ?
-    ORDER BY created_at DESC
-    LIMIT 100
-  `).all(strategyCode))
-    .filter((row) => watchlistSet.size === 0 || watchlistSet.has(row.symbol))
-    .map((row) => ({ ...row, stats: safeJson(row.stats_json), stats_json: undefined }));
-
-  return { watchlist, trades, backtests };
+  return { watchlist, trades };
 }
 
 export async function updateUserStrategySubscription(mobile, strategyCode, payload) {
+  if (strategyCode !== ACTIVE_STRATEGY_CODE) throw new Error('Only Heikin Ashi Doji Swing strategy is available.');
   const user = await requireUser(mobile);
   const targetLevel = normalizeTargetLevel(payload.targetLevel || 1);
   await getDb().prepare(`
@@ -494,13 +492,15 @@ export async function listStrategiesAdmin() {
   const rows = await getDb().prepare(`
     SELECT sc.*
     FROM strategy_catalog sc
+    WHERE sc.code = ?
     ORDER BY sc.mode, sc.name
-  `).all();
+  `).all(ACTIVE_STRATEGY_CODE);
   const perf = await strategyBacktestPerformance();
   return rows.map((row) => ({ ...parseStrategyRow(row), ...(perf.get(row.code) || { runs: 0, success_rate: 0, total_trades: 0 }) }));
 }
 
 export async function updateStrategyAdmin(code, payload) {
+  if (code !== ACTIVE_STRATEGY_CODE) throw new Error('Only Heikin Ashi Doji Swing strategy is configurable.');
   const settings = normalizeStrategySettings(payload.settings || payload.settings_json || {});
   await getDb().prepare(`
     UPDATE strategy_catalog
@@ -518,6 +518,32 @@ export async function updateStrategyAdmin(code, payload) {
     code,
   );
   return listStrategiesAdmin();
+}
+
+export async function syncMissingDailyCandlesAfterDataSourceConnect() {
+  const rangeTo = lastCompletedTradingDate();
+  const rangeFrom = moment(rangeTo).subtract(75, 'days').format('YYYY-MM-DD');
+  const instruments = await listInstruments();
+  const stale = instruments.filter((instrument) => {
+    const latest = instrument.latest_candle_date;
+    const hasEnoughHistory = Number(instrument.daily_candle_count || 0) >= 45;
+    return !latest || latest < rangeTo || !hasEnoughHistory;
+  });
+
+  logEvent('info', 'data-sync', `Post-connect daily candle sync queued for ${stale.length} stale instruments`, { rangeFrom, rangeTo });
+  const output = [];
+  for (const instrument of stale) {
+    const result = await fetchAndStoreCandles({
+      symbol: instrument.symbol,
+      resolution: 'D',
+      rangeFrom,
+      rangeTo,
+    });
+    await rebuildDailyAnalysis({ symbol: instrument.symbol, rangeFrom, rangeTo });
+    output.push(result?.[0] || { symbol: instrument.symbol, status: 'unknown' });
+  }
+  logEvent('info', 'data-sync', `Post-connect daily candle sync completed for ${output.length} instruments`, { rangeTo });
+  return output;
 }
 
 export async function fetchAndStoreCandles({ symbol, resolution = '15', rangeFrom, rangeTo, category }) {
@@ -1053,7 +1079,12 @@ async function ensureUserStrategyConfig(userId) {
 }
 
 async function ensureDefaultSubscriptions(userId) {
-  const strategies = await getDb().prepare('SELECT code FROM strategy_catalog WHERE enabled = 1').all();
+  await getDb().prepare(`
+    UPDATE user_strategy_subscriptions
+    SET enabled = 0, updated_at = ?
+    WHERE user_id = ? AND strategy_code != ?
+  `).run(nowIso(), userId, ACTIVE_STRATEGY_CODE);
+  const strategies = await getDb().prepare('SELECT code FROM strategy_catalog WHERE enabled = 1 AND code = ?').all(ACTIVE_STRATEGY_CODE);
   const stmt = getDb().prepare(`
     INSERT INTO user_strategy_subscriptions(user_id, strategy_code, enabled)
     VALUES (?, ?, 0)
@@ -1166,6 +1197,22 @@ function assertInstanceWindow() {
   }
 }
 
+function lastCompletedTradingDate(reference = moment()) {
+  let date = reference.clone();
+  const marketCloseBuffer = reference.clone().hour(16).minute(0).second(0).millisecond(0);
+  if (date.isoWeekday() > 5 || date.isBefore(marketCloseBuffer)) {
+    date = previousTradingWeekday(date);
+  }
+  while (date.isoWeekday() > 5) date = previousTradingWeekday(date);
+  return date.format('YYYY-MM-DD');
+}
+
+function previousTradingWeekday(date) {
+  const previous = date.clone().subtract(1, 'day');
+  while (previous.isoWeekday() > 5) previous.subtract(1, 'day');
+  return previous;
+}
+
 function parseSetting(value) {
   if (value === 'true') return true;
   if (value === 'false') return false;
@@ -1185,7 +1232,7 @@ function toDbBool(value) {
 async function markInstrumentSync(symbol, status, progress) {
   await getDb().prepare(`
     UPDATE instruments
-    SET sync_status = ?, sync_progress = ?, last_sync_at = CASE WHEN ? = 'idle' THEN ? ELSE last_sync_at END
+    SET sync_status = ?, sync_progress = ?, last_sync_at = CASE WHEN ? IN ('ready', 'empty', 'error', 'idle') THEN ? ELSE last_sync_at END
     WHERE symbol = ?
   `).run(status, progress, status, nowIso(), symbol);
 }

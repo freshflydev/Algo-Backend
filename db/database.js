@@ -666,8 +666,8 @@ async function migrateUserBrokersForMultipleAccounts() {
 
 async function seedDefaults() {
   const defaults = [
-    ['intraday_enabled', 'true'],
-    ['swing_enabled', 'false'],
+    ['intraday_enabled', 'false'],
+    ['swing_enabled', 'true'],
     ['intraday_ema_filter_enabled', 'false'],
     ['intraday_ha_doji_enabled', 'false'],
     ['intraday_ha_doji_ema_filter_enabled', 'true'],
@@ -697,12 +697,11 @@ async function seedDefaults() {
   for (const [key, value] of defaults) {
     await stmt.run(key, value);
   }
+  await db.prepare("UPDATE app_settings SET value = 'false', updated_at = CURRENT_TIMESTAMP WHERE key = 'intraday_enabled'").run();
+  await db.prepare("UPDATE app_settings SET value = 'true', updated_at = CURRENT_TIMESTAMP WHERE key = 'swing_enabled'").run();
 
   const strategies = [
-    ['intraday_gann_15m', 'GANN Breakout Intraday', 'intraday', 'BOTH', '15m', 50000, JSON.stringify({ emaFilter: false, targetLevels: [1, 2, 3, 4, 5] }), '15-minute GANN breakout strategy for intraday momentum.'],
-    ['intraday_ha_doji_gann_15m', 'Heikin Ashi Doji Intraday', 'intraday', 'BOTH', '15m', 50000, JSON.stringify({ emaFilter: true, targetLevels: [2] }), '15-minute Heikin Ashi doji continuation strategy.'],
-    ['swing_gann_daily', 'GANN Swing Continuation', 'swing', 'BUY', '1D', 100000, JSON.stringify({ emaFilter: true, targetLevels: [1, 2, 3, 4, 5] }), 'Daily GANN swing continuation strategy.'],
-    ['swing_ha_doji_gann', 'Heikin Ashi Doji Swing', 'swing', 'BUY', '1D', 100000, JSON.stringify({ emaFilter: true, targetLevels: [2] }), 'Daily Heikin Ashi doji swing continuation strategy.'],
+    ['swing_ha_doji_gann', 'Heikin Ashi Doji Swing', 'swing', 'BUY', '1D', 100000, JSON.stringify({ emaFilter: true, targetLevels: [1, 2, 3, 4, 5] }), 'Daily Heikin Ashi doji swing continuation strategy.'],
   ];
   const strategyStmt = db.prepare(`
     INSERT INTO strategy_catalog(code, name, mode, direction, timeframe, min_capital, settings_json, description)
@@ -712,6 +711,23 @@ async function seedDefaults() {
   for (const strategy of strategies) {
     await strategyStmt.run(...strategy);
   }
+
+  await db.prepare(`
+    UPDATE strategy_catalog
+    SET enabled = CASE WHEN code = 'swing_ha_doji_gann' THEN 1 ELSE 0 END,
+        updated_at = CURRENT_TIMESTAMP
+  `).run();
+  await db.prepare(`
+    UPDATE strategy_catalog
+    SET name = 'Heikin Ashi Doji Swing',
+        mode = 'swing',
+        direction = 'BUY',
+        timeframe = '1D',
+        settings_json = ?,
+        description = 'Daily Heikin Ashi doji swing continuation strategy.',
+        updated_at = CURRENT_TIMESTAMP
+    WHERE code = 'swing_ha_doji_gann'
+  `).run(JSON.stringify({ emaFilter: true, targetLevels: [1, 2, 3, 4, 5] }));
 }
 
 export function getDb() {

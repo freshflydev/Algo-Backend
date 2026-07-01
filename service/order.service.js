@@ -12,7 +12,8 @@ export async function placeStrategyOrder({ user, brokerAccount, strategy, symbol
   const quantity = resolveQuantity(user, entryPrice, strategy);
   const product = strategy.includes('swing') ? 'DELIVERY' : 'INTRADAY';
   const orderTag = buildOrderTag(user.id, strategy, symbol);
-  const dryRun = getSettings().dry_run_orders !== false;
+  const settings = await getSettings();
+  const dryRun = settings.dry_run_orders !== false;
 
   const orderId = createOrder({
     userId: user.id,
@@ -54,7 +55,8 @@ export async function placeStrategyOrder({ user, brokerAccount, strategy, symbol
 
 export async function exitOrder(order, exitPrice, reason) {
   if (!order || ['closed', 'dry_run_closed'].includes(order.status)) return order;
-  const dryRun = getSettings().dry_run_orders !== false || order.status.startsWith('dry_run');
+  const settings = await getSettings();
+  const dryRun = settings.dry_run_orders !== false || order.status.startsWith('dry_run');
   if (!dryRun) {
     // Live exit is adapter-owned. For market exits we place an opposite side order
     // with the same tag suffix so the broker orderbook can be reconciled later.
