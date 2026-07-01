@@ -4,6 +4,7 @@ import { calculateAndStoreDailyGannLevels, getSettings, listInstruments } from '
 import { forceCloseIntradayOrders, placeStrategyOrder } from '../service/order.service.js';
 import { getDb } from '../db/database.js';
 import { calculateEMA, toHeikinAshi } from '../util/Indicators.js';
+import { logEvent } from '../service/log.service.js';
 
 moment.tz.setDefault('Asia/Kolkata');
 
@@ -17,40 +18,57 @@ export function enableAlgoSchedulers() {
   configureIntradayJob();
   configureForceCloseJob();
   configureSwingJob();
+  logEvent('info', 'scheduler', 'Algo scheduler jobs configured');
 }
 
 function configureDailyGannJob() {
   dailyGannJob?.cancel();
   dailyGannJob = schedule.scheduleJob({ hour: 9, minute: 14, tz: 'Asia/Kolkata' }, async () => {
-    const settings = await getSettings();
-    if (!settings.intraday_enabled && !settings.swing_enabled) return;
-    await calculateAndStoreDailyGannLevels({ tradeDate: moment().format('YYYY-MM-DD') });
+    try {
+      const settings = await getSettings();
+      if (!settings.intraday_enabled && !settings.swing_enabled) {
+        logEvent('info', 'scheduler-daily-gann', 'Skipped daily GANN level job because strategies are disabled');
+        return;
+      }
+      const tradeDate = moment().format('YYYY-MM-DD');
+      await calculateAndStoreDailyGannLevels({ tradeDate });
+      logEvent('info', 'scheduler-daily-gann', `Completed daily GANN level job for ${tradeDate}`);
+    } catch (error) {
+      logEvent('error', 'scheduler-daily-gann', 'Daily GANN level job failed', { error: error.message || String(error) });
+    }
   });
 }
 
 function configureIntradayJob() {
   intradayJob?.cancel();
   intradayJob = schedule.scheduleJob('*/15 * * * *', async () => {
-    const settings = await getSettings();
-    if (!settings.intraday_enabled) return;
-    const now = moment();
-    const start = moment({ hour: 9, minute: 15 });
-    const end = moment({ hour: 15, minute: 0 });
-    if (!now.isBetween(start, end, undefined, '[]')) return;
+    try {
+      const settings = await getSettings();
+      if (!settings.intraday_enabled) return;
+      const now = moment();
+      const start = moment({ hour: 9, minute: 15 });
+      const end = moment({ hour: 15, minute: 0 });
+      if (!now.isBetween(start, end, undefined, '[]')) return;
 
-    const date = now.format('YYYY-MM-DD');
-    const instruments = listInstruments();
-    for (const instrument of instruments) {
-      const level = getDb().prepare('SELECT * FROM gann_levels WHERE symbol = ? AND trade_date = ?').get(instrument.symbol, date);
-      if (!level) continue;
-      const latest = getDb().prepare(`
-        SELECT * FROM candles WHERE symbol = ? AND resolution = '15' AND trade_date = ? ORDER BY candle_time DESC LIMIT 12
-      `).all(instrument.symbol, date);
-      if (latest.length < 2) continue;
-      const ordered = latest.reverse().map(dbCandleToStrategyCandle);
-      const current = ordered[ordered.length - 1];
-      const previous = ordered[ordered.length - 2];
-      await maybeTriggerIntradayOrders(instrument.symbol, current, previous, level, ordered, settings);
+      const date = now.format('YYYY-MM-DD');
+      const instruments = listInstruments();
+      let processed = 0;
+      for (const instrument of instruments) {
+        const level = getDb().prepare('SELECT * FROM gann_levels WHERE symbol = ? AND trade_date = ?').get(instrument.symbol, date);
+        if (!level) continue;
+        const latest = getDb().prepare(`
+          SELECT * FROM candles WHERE symbol = ? AND resolution = '15' AND trade_date = ? ORDER BY candle_time DESC LIMIT 12
+        `).all(instrument.symbol, date);
+        if (latest.length < 2) continue;
+        const ordered = latest.reverse().map(dbCandleToStrategyCandle);
+        const current = ordered[ordered.length - 1];
+        const previous = ordered[ordered.length - 2];
+        await maybeTriggerIntradayOrders(instrument.symbol, current, previous, level, ordered, settings);
+        processed += 1;
+      }
+      logEvent('info', 'scheduler-intraday', `Completed 15 minute strategy scan for ${processed} instruments`);
+    } catch (error) {
+      logEvent('error', 'scheduler-intraday', '15 minute strategy scan failed', { error: error.message || String(error) });
     }
   });
 }
@@ -58,9 +76,14 @@ function configureIntradayJob() {
 function configureForceCloseJob() {
   forceCloseJob?.cancel();
   forceCloseJob = schedule.scheduleJob({ hour: 15, minute: 15, tz: 'Asia/Kolkata' }, async () => {
-    const settings = await getSettings();
-    if (!settings.swing_enabled) {
-      await forceCloseIntradayOrders();
+    try {
+      const settings = await getSettings();
+      if (!settings.swing_enabled) {
+        await forceCloseIntradayOrders();
+        logEvent('info', 'scheduler-force-close', 'Completed intraday force-close job');
+      }
+    } catch (error) {
+      logEvent('error', 'scheduler-force-close', 'Intraday force-close job failed', { error: error.message || String(error) });
     }
   });
 }
@@ -68,11 +91,16 @@ function configureForceCloseJob() {
 function configureSwingJob() {
   swingJob?.cancel();
   swingJob = schedule.scheduleJob({ hour: 15, minute: 20, tz: 'Asia/Kolkata' }, async () => {
-    const settings = await getSettings();
-    if (!settings.swing_enabled) return;
-    // Swing execution is daily and long-only. Historical/backtest logic is implemented
-    // in strategyEngine; live order trigger is intentionally conservative until the
-    // daily candle is stored by the data fetch scheduler.
+    try {
+      const settings = await getSettings();
+      if (!settings.swing_enabled) return;
+      // Swing execution is daily and long-only. Historical/backtest logic is implemented
+      // in strategyEngine; live order trigger is intentionally conservative until the
+      // daily candle is stored by the data fetch scheduler.
+      logEvent('info', 'scheduler-swing', 'Swing scheduler checked daily candle readiness');
+    } catch (error) {
+      logEvent('error', 'scheduler-swing', 'Swing scheduler failed', { error: error.message || String(error) });
+    }
   });
 }
 
