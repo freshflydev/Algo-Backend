@@ -697,7 +697,7 @@ export async function backtestStrategyMatrix({ symbol, category = 'stock', range
       for (const useEma of emaVariants) {
         for (const targetLevel of targetLevels) {
           const candles = strategy.mode === 'intraday' ? intradayCandles : dailyCandles;
-          const result = runBacktestVariant(strategy.code, candles, {
+          const rawResult = runBacktestVariant(strategy.code, candles, {
             targetLevel,
             useEma,
             slippagePercent,
@@ -705,6 +705,9 @@ export async function backtestStrategyMatrix({ symbol, category = 'stock', range
             sameCandlePolicy,
             maxCandleRangePercent,
           });
+          const result = strategy.mode === 'swing'
+            ? clipBacktestResultToRange(rawResult, rangeFrom, rangeTo)
+            : rawResult;
           const variant = {
             variant: `${strategy.code}${useEma ? '_ema' : '_no_ema'}_t${targetLevel}`,
             strategy: strategy.code,
@@ -891,6 +894,81 @@ function runBacktestVariant(strategyCode, candles, options) {
   if (strategyCode === 'intraday_ha_doji_gann_15m') return runIntradayHaDojiGannStrategy(candles, options);
   if (strategyCode === 'swing_ha_doji_gann') return runSwingHaDojiGannStrategy(candles, options);
   return runSwingGannStrategy(candles, options);
+}
+
+function clipBacktestResultToRange(result, rangeFrom, rangeTo) {
+  const fromTs = moment.tz(rangeFrom, 'YYYY-MM-DD', 'Asia/Kolkata').startOf('day').unix();
+  const toTs = moment.tz(rangeTo, 'YYYY-MM-DD', 'Asia/Kolkata').endOf('day').unix();
+  const trades = (result.trades || []).filter((trade) => {
+    const time = Number(trade.entryTime || trade.exitTime || 0);
+    return time >= fromTs && time <= toTs;
+  });
+  return {
+    ...result,
+    trades,
+    stats: summarizeBacktestTrades(trades),
+  };
+}
+
+function summarizeBacktestTrades(trades) {
+  const closed = trades.filter((trade) => trade.exitReason !== 'OPEN_AT_RANGE_END');
+  const wins = closed.filter((trade) => Number(trade.pnl || 0) > 0);
+  const losses = closed.filter((trade) => Number(trade.pnl || 0) <= 0);
+  const totalPnl = closed.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0);
+  const targetHits = closed.filter((trade) => String(trade.exitReason || '').includes('TARGET')).length;
+  const slHits = closed.filter((trade) => String(trade.exitReason || '').includes('SL')).length;
+  const bestTrade = closed.reduce((best, trade) => !best || Number(trade.pnl || 0) > Number(best.pnl || 0) ? trade : best, null);
+  const worstTrade = closed.reduce((worst, trade) => !worst || Number(trade.pnl || 0) < Number(worst.pnl || 0) ? trade : worst, null);
+  return {
+    totalTrades: closed.length,
+    wins: wins.length,
+    losses: losses.length,
+    targetHits,
+    slHits,
+    successRatio: closed.length ? Number((wins.length / closed.length * 100).toFixed(2)) : 0,
+    totalPnl: Number(totalPnl.toFixed(2)),
+    averagePnl: closed.length ? Number((totalPnl / closed.length).toFixed(2)) : 0,
+    highReturn: Number(bestTrade?.pnl || 0),
+    maxLoss: Number(worstTrade?.pnl || 0),
+    maxTargetHit: targetHits,
+    maxProfitDay: calculateBestDayPnl(closed),
+    maxLossDay: calculateWorstDayPnl(closed),
+    bestTrade,
+    worstTrade,
+    expectancy: closed.length ? Number((totalPnl / closed.length).toFixed(2)) : 0,
+    maxDrawdown: calculateBacktestDrawdown(closed),
+  };
+}
+
+function calculateBestDayPnl(trades) {
+  const values = dayPnlValues(trades);
+  return values.length ? Math.max(...values) : 0;
+}
+
+function calculateWorstDayPnl(trades) {
+  const values = dayPnlValues(trades);
+  return values.length ? Math.min(...values) : 0;
+}
+
+function dayPnlValues(trades) {
+  const dayPnl = new Map();
+  for (const trade of trades) {
+    const day = trade.exitTime ? moment.unix(trade.exitTime).format('YYYY-MM-DD') : 'unknown';
+    dayPnl.set(day, Number(((dayPnl.get(day) || 0) + Number(trade.pnl || 0)).toFixed(2)));
+  }
+  return [...dayPnl.values()];
+}
+
+function calculateBacktestDrawdown(trades) {
+  let equity = 0;
+  let peak = 0;
+  let maxDrawdown = 0;
+  for (const trade of trades) {
+    equity += Number(trade.pnl || 0);
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.min(maxDrawdown, equity - peak);
+  }
+  return Number(maxDrawdown.toFixed(2));
 }
 
 function pickBestVariant(variants) {

@@ -1,6 +1,8 @@
 import { getDb } from '../db/database.js';
 import { listLogs } from './log.service.js';
 
+const ACTIVE_STRATEGY_CODE = 'swing_ha_doji_gann';
+
 export async function getUserDetails(mobile) {
   const user = await getDb().prepare('SELECT * FROM users WHERE mobile = ?').get(mobile);
   if (!user) throw new Error('User not found.');
@@ -80,9 +82,10 @@ export async function strategyPerformance() {
   const rows = await getDb().prepare(`
     SELECT strategy, symbol, stats_json, created_at
     FROM backtests
+    WHERE strategy = ?
     ORDER BY id DESC
     LIMIT 200
-  `).all();
+  `).all(ACTIVE_STRATEGY_CODE);
   const grouped = new Map();
   for (const row of rows) {
     const stats = JSON.parse(row.stats_json);
@@ -114,9 +117,10 @@ export async function backtestSummaries() {
   const rows = await getDb().prepare(`
     SELECT id, strategy, symbol, range_from, range_to, stats_json, created_at
     FROM backtests
+    WHERE strategy = ?
     ORDER BY id DESC
     LIMIT 100
-  `).all();
+  `).all(ACTIVE_STRATEGY_CODE);
   return rows.map((row) => ({ ...row, stats: JSON.parse(row.stats_json), stats_json: undefined }));
 }
 
